@@ -1,5 +1,9 @@
 # Notes — ViT from scratch on SDNET2018
 
+See also: [STR1.md](STR1.md) — STR-1 skeleton-graph sparse attention in the ViT and in a ResNet-style hybrid
+(`hybrid.py`), including the finding that the raw-gradient structure tensor follows texture and why the
+default prior is a Hessian ridge prior.
+
 ## What was borrowed from the LoopCrackViT repo (`../../code repo`)
 
 | here | from | changes |

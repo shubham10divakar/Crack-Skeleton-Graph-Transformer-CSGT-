@@ -6,7 +6,13 @@ faithfulness. Adapted from the LoopCrackViT repo's gradcam.py.
     python gradcam.py --run runs/<run> --images a.jpg b.jpg                   # explain your own images
 
 Panels per image:
-    input | Grad-CAM last block | Grad-CAM middle block | attention rollout
+    ViT     input | Grad-CAM last block | Grad-CAM middle block | attention rollout [| STR-1 coherence]
+    hybrid  input | Grad-CAM stage 3 (14x14) | Grad-CAM stage 4 (7x7) [| STR-1 coherence]
+
+For the hybrid (hybrid.py), Grad-CAM is the standard CNN one on the output feature map of a stage.
+For STR-1 models the coherence prior c_i of the skeleton graph is shown too (it is a fixed input-derived prior,
+not a learned saliency; its faithfulness row tells whether the geometry alone points at what the model uses),
+and fig_str1_graph draws the token tangents and the graph edges of the most coherent tokens.
 
 Grad-CAM on a ViT: with [CLS] pooling the head reads only [CLS], so the patch tokens at the OUTPUT of the
 last block get no gradient. We therefore take the INPUT tokens of a block (its attention is what moves
@@ -26,6 +32,7 @@ Writes to <out> (default <run>/gradcam/):
     fig_gradcam_cracked_vs_intact.{png,pdf}  intact (TN) vs cracked (TP), one per surface
     fig_gradcam_failures.{png,pdf}           a missed crack (FN) and a false alarm (FP) per surface
     fig_faithfulness.{png,pdf}               deletion / insertion curves
+    fig_str1_graph.{png,pdf}                 STR-1 models: tangents (length ~ coherence) + skeleton-graph edges
     faithfulness.csv  faithfulness_curves.csv  test_predictions.csv  summary.json  README.md
 """
 from __future__ import annotations
@@ -54,6 +61,7 @@ except ImportError:
 import metrics as M
 from data import NORMS, CrackDataset, build_transforms
 from evaluate import load_run, pick_device, run_split
+from hybrid import HybridNet
 
 CASES = {"TP": "true positive", "FN": "false negative (missed crack)",
          "FP": "false positive", "TN": "true negative"}
@@ -141,6 +149,8 @@ class Explainer:
                 grd = t.grad[:, 1:].float().transpose(1, 2).reshape(len(x), -1, g, g)
                 res[f"gradcam_{l}"] = self._cam(act, grd)
             res["rollout"] = self.rollout()
+            if self.m.graph is not None:
+                res["coherence"] = self.m.graph(x.detach())["coh"].view(len(x), g, g)
         finally:
             for b in self.m.blocks:
                 b.attn.store_attn, b.attn.attn = False, None
@@ -149,7 +159,96 @@ class Explainer:
         return out
 
     def titles(self):
-        return {**{f"gradcam_{l}": f"Grad-CAM\n{self.names[l]}" for l in self.layers}, "rollout": "Attention\nrollout"}
+        t = {**{f"gradcam_{l}": f"Grad-CAM\n{self.names[l]}" for l in self.layers}, "rollout": "Attention\nrollout"}
+        if self.m.graph is not None:
+            t["coherence"] = "STR-1\ncoherence prior"
+        return t
+
+    def graph(self, x):
+        return self.m.graph(x) if self.m.graph is not None else None
+
+
+class HybridExplainer:
+    """Grad-CAM on the output feature maps of stages 3 (14x14) and 4 (7x7) of HybridNet."""
+
+    def __init__(self, model, stages=(3, 4)):
+        self.m, self.stages, self.feats = model, list(stages), {}
+        for s in self.stages:
+            model.stages[s - 1][-1].register_forward_hook(self._hook(s))
+
+    def _hook(self, s):
+        def fn(mod, inp, out):
+            if out.requires_grad:
+                out.retain_grad()
+                self.feats[s] = out
+        return fn
+
+    def __call__(self, x):
+        self.feats = {}
+        x = x.clone().requires_grad_(True)
+        with torch.enable_grad():
+            logit = self.m(x)
+            logit.float().sum().backward()
+        res = {}
+        for s in self.stages:
+            a, g = self.feats[s].detach().float(), self.feats[s].grad.float()
+            res[f"gradcam_s{s}"] = Explainer._cam(a, g)
+        geo = self.graph(x.detach())
+        if geo is not None:
+            res["coherence"] = geo["coh"].view(len(x), self.m.grid, self.m.grid)
+        out = {k: v.detach().cpu().numpy() for k, v in res.items()}
+        out["p"] = torch.sigmoid(logit.detach().float()).cpu().numpy()
+        return out
+
+    def _graph_module(self):
+        g = self.m.graphs
+        return g[str(self.m.grid)] if g is not None and str(self.m.grid) in g else None
+
+    def graph(self, x):
+        G = self._graph_module()
+        return G(x) if G is not None else None
+
+    def titles(self):
+        sz = {3: self.m.cfg.image_size // 16, 4: self.m.cfg.image_size // 32}
+        t = {f"gradcam_s{s}": f"Grad-CAM\nstage {s} ({sz[s]}x{sz[s]})" for s in self.stages}
+        if self._graph_module() is not None:
+            t["coherence"] = "STR-1\ncoherence prior"
+        return t
+
+
+def make_explainer(model, layers=None):
+    return HybridExplainer(model) if isinstance(model, HybridNet) else Explainer(model, layers)
+
+
+def draw_graph(rows, path, top=4):
+    """STR-1 figure: tangent sticks (length ~ coherence) on every token + edges of the `top` most coherent tokens."""
+    if not rows:
+        return
+    n = len(rows)
+    fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 3.4), squeeze=False)
+    for ax, r in zip(axes[0], rows):
+        img, th, c, E = r["img"], r["theta"], r["coh"], r["edges"]
+        S, g = img.shape[0], int(round(len(th) ** 0.5))
+        cell = S / g
+        show_img(ax, img)
+        ys, xs = np.divmod(np.arange(g * g), g)
+        cx, cy = (xs + 0.5) * cell, (ys + 0.5) * cell
+        L = 0.45 * cell * c
+        ax.plot(np.stack([cx - L * np.cos(th), cx + L * np.cos(th)]),
+                np.stack([cy - L * np.sin(th), cy + L * np.sin(th)]), color="#ffd400", lw=1.2)
+        for i in np.argsort(-c)[:top]:
+            for j in np.nonzero(E[i])[0]:
+                if j != i:
+                    ax.plot([cx[i], cx[j]], [cy[i], cy[j]], color="#00e5ff", lw=1.0, alpha=0.9)
+            ax.scatter([cx[i]], [cy[i]], s=18, color="#ff2d55", zorder=3)
+        ax.set_xlim(0, S); ax.set_ylim(S, 0)
+        ax.set_xlabel(f"{r['label']}  p={r['p']:.2f}", fontsize=8)
+    fig.suptitle("STR-1 skeleton graph: token tangents (yellow, length ~ coherence) and graph edges of the most "
+                 "coherent tokens (cyan)", fontsize=9)
+    fig.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(f"{path}.{ext}", dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def upsample(m, size):
@@ -247,7 +346,7 @@ def main():
     tf = build_transforms(targs["image_size"], "none", norm)
     out = args.out or os.path.join(run, "gradcam" if args.ckpt == "best.pt" else f"gradcam_{os.path.splitext(args.ckpt)[0]}")
     os.makedirs(out, exist_ok=True)
-    expl = Explainer(model, args.layers)
+    expl = make_explainer(model, args.layers)
     titles = expl.titles()
     maps = list(titles)
 
@@ -270,7 +369,7 @@ def main():
     te.to_csv(os.path.join(out, "test_predictions.csv"), index=False)
     summ = {"checkpoint": os.path.join(run, args.ckpt), "epoch": ck.get("epoch"), "threshold_val_bestF1": thr,
             "test_auc": roc_auc_score(y, te["p_cracked"]), "test_counts": te["case"].value_counts().to_dict(),
-            "gradcam_layers": [expl.names[l] for l in expl.layers]}
+            "maps": [t.replace("\n", " ") for t in titles.values()]}
     print(json.dumps(summ, indent=2))
 
     # ---- examples: TP/TN = confident, FN/FP = most confidently wrong; sampled from the top 30
@@ -303,6 +402,15 @@ def main():
               os.path.join(out, "fig_gradcam_cracked_vs_intact"), "Intact (TN, top) vs cracked (TP, bottom)")
     draw_rows([r for s in surfaces for c in ("FN", "FP") for r in by(surface=s, case=c)[:1]], maps, titles,
               os.path.join(out, "fig_gradcam_failures"), "Failure cases: missed cracks (FN) and false alarms (FP)")
+    if "coherence" in maps:                                    # STR-1 graph figure: one TP per surface
+        mean, std = (np.array(v, dtype=np.float32) for v in NORMS[norm])
+        grows = []
+        for r in [r for s in surfaces for r in by(surface=s, case="TP")[:1]]:
+            x = torch.from_numpy(((r["img"] - mean) / std).transpose(2, 0, 1).astype(np.float32))
+            geo = expl.graph(x[None].to(device))
+            grows.append(dict(img=r["img"], p=r["p"], label=r["surface"], theta=geo["theta"][0].cpu().numpy(),
+                              coh=geo["coh"][0].cpu().numpy(), edges=geo["edges"][0].cpu().numpy()))
+        draw_graph(grows, os.path.join(out, "fig_str1_graph"))
 
     fdf = None
     if args.n_faith > 0:
@@ -348,11 +456,11 @@ def main():
         summ["faithfulness"] = res
 
     json.dump(summ, open(os.path.join(out, "summary.json"), "w"), indent=2, default=float)
-    write_readme(out, run, args, summ, fdf, titles)
+    write_readme(out, run, args, summ, fdf, titles, model)
     print(f"\nall outputs -> {out}")
 
 
-def write_readme(out, run, args, summ, fdf, titles):
+def write_readme(out, run, args, summ, fdf, titles, model):
     c = summ["test_counts"]
     md = [f"# Grad-CAM explanations — {os.path.basename(run)}", "",
           f"Generated by `python gradcam.py --run {run}` from `{args.ckpt}` (epoch {summ['epoch']}). "
@@ -363,10 +471,14 @@ def write_readme(out, run, args, summ, fdf, titles):
           "| `fig_gradcam_cracked_vs_intact` | intact (TN) vs cracked (TP), one per surface |",
           "| `fig_gradcam_failures` | a missed crack (FN) and a false alarm (FP) per surface |",
           "| `fig_faithfulness` | deletion / insertion curves (`faithfulness.csv`, `faithfulness_curves.csv`) |",
+          "| `fig_str1_graph` | STR-1 models: token tangents and skeleton-graph edges on one TP per surface |",
           "| `test_predictions.csv` | P(Cracked), prediction and TP/FN/FP/TN case per test image |", "",
           "Columns: input · " + " · ".join(t.replace("\n", " ") for t in titles.values()) + ". "
-          "Grad-CAM uses the input tokens of the named block (the head reads only [CLS]); "
-          "rollout multiplies head-averaged attention over all blocks.", ""]
+          + ("Grad-CAM on the output feature map of the named stage. " if isinstance(model, HybridNet) else
+             "Grad-CAM uses the input tokens of the named block (the head reads only [CLS]); "
+             "rollout multiplies head-averaged attention over all blocks. ")
+          + ("The STR-1 coherence prior is computed from the input image (not learned); `fig_str1_graph` shows "
+             "the token tangents and the skeleton-graph edges." if "coherence" in titles else ""), ""]
     if fdf is not None:
         md += [f"## Faithfulness ({int(fdf.n_images.iloc[0])} correctly classified cracked test images)", "",
                "| saliency map | deletion AUC ↓ | insertion AUC ↑ |", "|---|---|---|"]

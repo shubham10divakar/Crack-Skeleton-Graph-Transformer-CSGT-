@@ -42,7 +42,7 @@ except ImportError:
 import metrics as M
 from data import CrackDataset, build_transforms, load_split
 from paper import write_report
-from vit import ViT, ViTConfig
+from models import model_from_cfg
 
 TABLE = [("ROC-AUC", "auc", ".4f"), ("PR-AUC (average precision)", "ap", ".4f"), ("Accuracy", "acc", ".4f"),
          ("Crack recall (sensitivity)", "recall", ".4f"), ("Crack precision", "precision", ".4f"),
@@ -60,7 +60,7 @@ def load_run(run, ckpt="best.pt", device="cpu"):
     """-> (model in eval mode with the evaluated weights (EMA if present), training args, checkpoint dict)."""
     cfg = json.load(open(os.path.join(run, "config.json")))
     ck = torch.load(os.path.join(run, ckpt), map_location="cpu", weights_only=False)
-    model = ViT(ViTConfig(**ck.get("model_cfg", cfg["model"])))
+    model = model_from_cfg(ck.get("model_cfg", cfg["model"]))
     model.load_state_dict(ck["ema"] if ck.get("ema") is not None else ck["model"])
     return model.to(device).eval(), cfg["args"], ck
 

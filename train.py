@@ -4,12 +4,14 @@ Train a Vision Transformer FROM SCRATCH on SDNET2018 (binary: Cracked vs Non-cra
     python train.py                                   # ViT-S/16, balanced split (config.yaml)
     python train.py --summary-only                    # model summary only, no data needed
     python train.py --variant vit_ti16 --batch-size 128
+    python train.py --stem conv --attention str1      # ViT-S/16 conv stem + STR-1 skeleton-graph attention
+    python train.py --variant hyb_r26                 # ResNet-style conv + STR-1 attention hybrid
     python train.py --resume auto                     # continue <run>/last.pt (same flags as the run)
     python train.py --resume runs/<run>/epoch_0030.pt # restart from any saved epoch
 
 Flags override the YAML (every key in config.yaml is a flag: `drop_path` -> `--drop-path`).
 Everything is written to runs/<run_name>/:
-    best.pt last.pt epoch_NNNN.pt   config.json log.csv history.json train_log.txt curves.png
+    best.pt last.pt epoch_NNNN.pt   config.json model.txt log.csv history.json train_log.txt curves.png
     results.json results.csv operating_points.csv per_surface.csv test_predictions.csv
     paper/ (metrics table + ROC/PR, reliability, confusion and training-curve figures)
 """
@@ -46,7 +48,8 @@ import metrics as M
 from augment import MinorityBank, mix_batch, smote_batch
 from data import build_loaders, data_summary, load_split
 from paper import write_report
-from vit import ViT, ViTConfig
+from modelinfo import model_report
+from models import arch_tag, config_from_args, model_from_cfg, normalized
 
 MINIMISE = {"val_loss"}
 # flags that change the optimisation; a resume with different values is allowed but warned about
@@ -120,24 +123,10 @@ def get_args():
     return args
 
 
-def model_config(a):
-    return ViTConfig.from_variant(
-        a.variant, image_size=a.image_size, patch_size=a.patch_size, dim=a.dim, depth=a.depth,
-        num_heads=a.num_heads, mlp_ratio=a.mlp_ratio, qkv_bias=a.qkv_bias, stem=a.stem, pool=a.pool,
-        dropout=a.dropout, attn_dropout=a.attn_dropout, drop_path=a.drop_path, layer_scale=a.layer_scale)
-
-
-def run_name(a, c: ViTConfig):
-    arch = c.variant
-    defaults = ViTConfig.from_variant(c.variant)
-    if (c.dim, c.depth, c.num_heads, c.patch_size) != (defaults.dim, defaults.depth, defaults.num_heads,
-                                                        defaults.patch_size):
-        arch += f"-d{c.dim}x{c.depth}h{c.num_heads}p{c.patch_size}"
-    arch += ("_conv" if c.stem == "conv" else "") + ("_gap" if c.pool == "gap" else "") \
-        + (f"_r{c.image_size}" if c.image_size != 224 else "")
+def run_name(a, c):
     tag = ((f"_cut{a.cutmix_alpha:g}" if a.cutmix_alpha > 0 else "") + (f"_mix{a.mixup_alpha:g}" if a.mixup_alpha > 0 else "")
            + (f"_{a.imbalance}" if a.imbalance != "off" else "") + (f"_ema" if a.ema_decay > 0 else ""))
-    return f"{arch}_bs{a.batch_size * a.grad_accum}_lr{a.lr:g}_{a.split_mode}_{a.augment}{tag}_s{a.seed}"
+    return f"{arch_tag(c)}_bs{a.batch_size * a.grad_accum}_lr{a.lr:g}_{a.split_mode}_{a.augment}{tag}_s{a.seed}"
 
 
 def pick_device(name):
@@ -246,12 +235,13 @@ def cosine_lr(step, total, warmup, base, min_lr):
 
 
 def param_groups(model, wd):
-    """AdamW groups: no weight decay on norms, biases, cls token, pos-embed and LayerScale gammas."""
+    """AdamW groups: no weight decay on norms, biases, cls token, pos-embed, gammas, relative position bias."""
     decay, no_decay = [], []
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        (no_decay if p.ndim <= 1 or n in ("cls_token", "pos_embed") or n.endswith(".gamma") else decay).append(p)
+        (no_decay if p.ndim <= 1 or n in ("cls_token", "pos_embed") or n.endswith((".gamma", "rel_bias"))
+         else decay).append(p)
     return [{"params": decay, "weight_decay": wd}, {"params": no_decay, "weight_decay": 0.0}]
 
 
@@ -328,11 +318,12 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
-    mcfg = model_config(args)
-    model = ViT(mcfg).to(device)
+    mcfg = config_from_args(args)
+    model = model_from_cfg(mcfg.to_dict()).to(device)
     name = run_name(args, mcfg)
     print(f">>> RUN {name}  (from scratch, no pretrained weights)")
-    print(model.summary())
+    report = model_report(model, mcfg, device)
+    print(report)
     if args.summary_only:
         return
 
@@ -347,6 +338,8 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
 
     os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "model.txt"), "w", encoding="utf8") as f:
+        f.write(name + "\n\n" + report + "\n")
     if isinstance(sys.stdout, ConsoleLog):
         sys.stdout.attach(os.path.join(out, "train_log.txt"))
     cfg_path = os.path.join(out, "config.json")
@@ -395,7 +388,7 @@ def main():
         if "optimizer" not in ck:
             raise SystemExit(f"--resume: {args.resume} is a weights-only checkpoint (epoch_ckpt=weights); "
                              f"resume from last.pt or a full epoch checkpoint")
-        if ck["model_cfg"] != mcfg.to_dict():
+        if normalized(ck["model_cfg"]) != mcfg.to_dict():
             raise SystemExit("--resume: checkpoint model config differs from the current one "
                              "(use the flags the run was started with)")
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["optimizer"])
@@ -556,8 +549,11 @@ def main():
     pred.to_csv(f"{out}/test_predictions.csv", index=False)
     write_report(out, name, yv, pv, yt, pt, cx["total_params"], cx.get("gmacs"), history, "best.pt", ck["epoch"])
 
-    res = dict(run=name, variant=mcfg.variant, dim=mcfg.dim, depth=mcfg.depth, heads=mcfg.num_heads,
-               patch=mcfg.patch_size, stem=mcfg.stem, pool=mcfg.pool, split_mode=args.split_mode, augment=args.augment,
+    res = dict(run=name, variant=mcfg.variant, arch=mcfg.arch, attention=mcfg.attention,
+               **{k: getattr(mcfg, a, None) for k, a in (("dim", "dim"), ("depth", "depth"), ("heads", "num_heads"),
+                                                         ("patch", "patch_size"), ("stem", "stem"), ("pool", "pool"),
+                                                         ("attn_stages", "attn_stages"))},
+               split_mode=args.split_mode, augment=args.augment,
                batch_size=args.batch_size * accum, lr=args.lr, epochs_run=len(history), best_epoch=es.best_epoch,
                stopped_early=stopped_early, train_min=total_min, test_loss=tloss, **cx, thr_val_f1=thr_f,
                thr_val_recall=thr_r)

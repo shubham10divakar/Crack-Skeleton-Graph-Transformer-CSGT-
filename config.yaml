@@ -13,7 +13,8 @@ norm: half                     # half (mean/std 0.5, from scratch) | imagenet
 num_workers: 4                 # Windows: each worker is a full process; drop to 2 on MemoryError
 
 # ---------------- model (vit.py) ----------------
-# variant presets: vit_ti16 | vit_s16 | vit_s32 | vit_m16 | vit_b16 | vit_b32   (dim/depth/heads/patch)
+# variant presets: vit_ti16 | vit_s16 | vit_s32 | vit_m16 | vit_b16 | vit_b32   (ViT: dim/depth/heads/patch)
+#                  hyb_r26 | hyb_r50   (ResNet-style conv + attention hybrid, hybrid.py; ViT-only keys ignored)
 variant: vit_s16
 image_size: 224
 patch_size: null               # null = variant default; override e.g. --patch-size 8 (4x tokens, ~5x compute)
@@ -28,6 +29,20 @@ dropout: 0.0
 attn_dropout: 0.0
 drop_path: 0.1                 # stochastic depth (DeiT: 0.1 for S/16; try 0.2 for B/16, 0.0 for Ti)
 layer_scale: 0.0               # >0 = LayerScale init (e.g. 0.0001); 0 = off (plain ViT)
+hybrid_attn_stages: "3,4"      # hybrid only: stages with attention blocks ("4" = BoTNet, "" = plain ResNet)
+
+# ---------------- attention (both architectures; docs/STR1.md) ----------------
+attention: mhsa                # mhsa (dense) | str1 (STR-1 skeleton-graph sparse attention)
+str_k: 8                       # neighbours per token (ablation: 4 / 8 / 16)
+str_radius: 4.0                # candidate radius in token cells
+str_alpha: 30.0                # tangent-cone half-angle (deg): neighbour must lie along the query's tangent
+str_beta: 30.0                 # max orientation difference (deg) between query and neighbour
+str_rho: 1.0                   # distance scale in the edge score
+str_mode: soft                 # hard (graph mask only) | soft (mask + learned per-head edge-score bias)
+str_dense_heads: 1             # dense fallback heads per layer (0 = all heads sparse)
+str_coh_gate: true             # gating: incoherent / weak-ridge (texture) tokens fall back to isotropic kNN
+str_prior: ridge               # ridge (Hessian dark-line, default) | gradient (plain structure tensor; texture-dominated)
+str_sigma: 2.0                 # ridge prior: Gaussian scale in pixels (~ crack half-width)
 
 # ---------------- training ----------------
 epochs: 100

@@ -12,6 +12,9 @@ keys identical apart from patch_embed.proj -> stem.proj). The others are the
 same architecture with a different width / depth / patch size, so results are directly comparable.
 
 Every config field can be overridden from the CLI (``--drop-path 0.2 --stem conv --pool gap`` ...).
+
+``attention="str1"`` swaps MHSA for STR-1 skeleton-graph sparse attention (geometry.py, docs/STR1.md): the
+graph is built once per image from the input and shared by all blocks; [CLS] stays densely connected.
 """
 from __future__ import annotations
 
@@ -21,6 +24,8 @@ from dataclasses import asdict, dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from geometry import GeoAttention, SkeletonGraph, with_cls
 
 # name -> (dim, depth, heads, patch). mlp_ratio 4 everywhere, as in the ViT / DeiT papers.
 VARIANTS = {
@@ -50,6 +55,18 @@ class ViTConfig:
     drop_path: float = 0.1           # stochastic depth, linearly increasing over depth (DeiT: 0.1 for S)
     layer_scale: float = 0.0         # >0 enables LayerScale (CaiT) with this init, e.g. 1e-4; 0 = off
     num_outputs: int = 1             # 1 logit, BCE (Cracked = 1)
+    arch: str = "vit"
+    attention: str = "mhsa"          # mhsa | str1 (skeleton-graph sparse attention)
+    str_k: int = 8                   # STR-1: neighbours per token
+    str_radius: float = 4.0          #        candidate radius (token cells)
+    str_alpha: float = 30.0          #        tangent-cone half-angle (deg)
+    str_beta: float = 30.0           #        max orientation difference (deg)
+    str_rho: float = 1.0             #        distance scale in the edge score
+    str_mode: str = "soft"           #        hard (mask only) | soft (mask + learned edge-score bias)
+    str_dense_heads: int = 1         #        dense fallback heads per block
+    str_coh_gate: bool = True        #        coherence gating of the orientation prior
+    str_prior: str = "ridge"         #        ridge (Hessian dark-line) | gradient (plain structure tensor)
+    str_sigma: float = 2.0           #        ridge scale in pixels
 
     def to_dict(self):
         return asdict(self)
@@ -120,26 +137,9 @@ class ConvStem(nn.Module):
         return self.proj(x)
 
 
-class Attention(nn.Module):
-    def __init__(self, dim, heads, qkv_bias=True, attn_drop=0.0, proj_drop=0.0):
-        super().__init__()
-        self.heads, self.scale = heads, (dim // heads) ** -0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
-        self.attn_drop, self.proj_drop = attn_drop, nn.Dropout(proj_drop)
-        self.store_attn = False          # set by gradcam.py: compute attention explicitly and keep it
-        self.attn = None
-
-    def forward(self, x):
-        B, N, C = x.shape
-        q, k, v = self.qkv(x).reshape(B, N, 3, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
-        if self.store_attn:              # explicit softmax so the map can be read (attention rollout)
-            a = ((q * self.scale) @ k.transpose(-2, -1)).softmax(-1)
-            self.attn = a
-            x = a @ v
-        else:                            # fused flash / memory-efficient kernel
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop if self.training else 0.0)
-        return self.proj_drop(self.proj(x.transpose(1, 2).reshape(B, N, C)))
+def make_attention(c, rel_grid=None):
+    return GeoAttention(c.dim, c.num_heads, c.qkv_bias, c.attn_dropout, c.dropout, c.attention, c.str_dense_heads,
+                        c.str_mode == "soft", rel_grid)
 
 
 class Mlp(nn.Module):
@@ -153,17 +153,18 @@ class Mlp(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim, heads, mlp_ratio, qkv_bias, drop, attn_drop, drop_path, ls_init):
+    def __init__(self, c, drop_path):
         super().__init__()
+        dim, drop, ls_init = c.dim, c.dropout, c.layer_scale
         self.norm1, self.norm2 = nn.LayerNorm(dim, eps=1e-6), nn.LayerNorm(dim, eps=1e-6)
-        self.attn = Attention(dim, heads, qkv_bias, attn_drop, drop)
-        self.mlp = Mlp(dim, int(dim * mlp_ratio), drop)
+        self.attn = make_attention(c)
+        self.mlp = Mlp(dim, int(dim * c.mlp_ratio), drop)
         self.ls1 = LayerScale(dim, ls_init) if ls_init > 0 else nn.Identity()
         self.ls2 = LayerScale(dim, ls_init) if ls_init > 0 else nn.Identity()
         self.drop_path = DropPath(drop_path)
 
-    def forward(self, x):
-        x = x + self.drop_path(self.ls1(self.attn(self.norm1(x))))
+    def forward(self, x, geo=None):
+        x = x + self.drop_path(self.ls1(self.attn(self.norm1(x), geo)))
         return x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
 
 
@@ -182,8 +183,9 @@ class ViT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, self.grid ** 2 + 1, c.dim))
         self.pos_drop = nn.Dropout(c.dropout)
         dpr = [c.drop_path * i / max(1, c.depth - 1) for i in range(c.depth)]
-        self.blocks = nn.ModuleList(Block(c.dim, c.num_heads, c.mlp_ratio, c.qkv_bias, c.dropout, c.attn_dropout,
-                                          dpr[i], c.layer_scale) for i in range(c.depth))
+        self.blocks = nn.ModuleList(Block(c, dpr[i]) for i in range(c.depth))
+        self.graph = (SkeletonGraph(self.grid, c.str_k, c.str_radius, c.str_alpha, c.str_beta, c.str_rho, c.str_mode,
+                                    c.str_coh_gate, c.str_prior, c.str_sigma) if c.attention == "str1" else None)
         self.norm = nn.LayerNorm(c.dim, eps=1e-6)
         self.head = nn.Linear(c.dim, c.num_outputs)
         self._init()
@@ -211,10 +213,15 @@ class ViT(nn.Module):
         x = torch.cat([self.cls_token.expand(x.shape[0], -1, -1), x], 1)
         return self.pos_drop(x + self.pos_embed)
 
+    def geometry(self, x):
+        """STR-1 graph of the input images (None for MHSA)."""
+        return with_cls(self.graph(x)) if self.graph is not None else None
+
     def features(self, x):
+        geo = self.geometry(x)
         x = self.tokens(x)
         for blk in self.blocks:
-            x = blk(x)
+            x = blk(x, geo)
         x = self.norm(x)
         return x[:, 0] if self.cfg.pool == "cls" else x[:, 1:].mean(1)
 
@@ -240,7 +247,7 @@ class ViT(nn.Module):
         out = [line, f"{c.variant} | dim {c.dim} | depth {c.depth} | heads {c.num_heads} | mlp {c.mlp_ratio:g}x | "
                      f"patch {c.patch_size} ({c.stem} stem) | {c.image_size}px",
                f"tokens {r['tokens']} ({self.grid}x{self.grid} + CLS) | pool {c.pool} | drop_path {c.drop_path} | "
-               f"layer_scale {c.layer_scale or 'off'}", line]
+               f"layer_scale {c.layer_scale or 'off'}", f"attention {attention_desc(c)}", line]
         rows = r["rows"]
         blk = [k for k in rows if k.startswith("block.")]
         out.append(f"  {'stem':<28}{rows['stem']:>16,}")
@@ -249,6 +256,14 @@ class ViT(nn.Module):
         out.append(f"  {'norm+head (1 logit)':<28}{rows['norm+head']:>16,}")
         out += [line, f"  {'TOTAL parameters':<28}{r['total_params']:>16,}  ({r['total_params'] / 1e6:.2f}M)", line]
         return "\n".join(out)
+
+
+def attention_desc(c):
+    if c.attention != "str1":
+        return "MHSA (dense)"
+    return (f"STR-1 skeleton-graph ({c.str_mode}, k={c.str_k}, radius={c.str_radius:g}, alpha={c.str_alpha:g}, "
+            f"beta={c.str_beta:g}, {c.str_prior} prior, gate {'on' if c.str_coh_gate else 'off'}, "
+            f"{c.str_dense_heads}/{c.num_heads} dense heads)")
 
 
 def build_vit(variant="vit_s16", **overrides) -> ViT:

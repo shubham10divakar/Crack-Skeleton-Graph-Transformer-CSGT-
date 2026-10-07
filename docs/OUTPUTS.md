@@ -6,6 +6,7 @@
 |---|---|
 | `best.pt`, `last.pt`, `epoch_NNNN.pt` | checkpoints (see NOTES.md → Checkpoints) |
 | `config.json` | all flags + model config |
+| `model.txt` | full model report: summary, config, layer tree with output shapes and parameter counts, totals, GMACs |
 | `train_log.txt` | everything printed (appended on resume, crashes included) |
 | `log.csv`, `history.json` | per epoch: lr, train loss/acc, val loss/acc/bal-acc/AUC/AP/F1/F2/precision/recall/MCC, seconds, img/s |
 | `curves.png` | loss, val AUC, val F1/MCC, learning rate |
@@ -23,8 +24,8 @@
 
 ## `gradcam.py` → `<run>/gradcam/`
 
-`fig_gradcam_cracked`, `fig_gradcam_cracked_vs_intact`, `fig_gradcam_failures`, `fig_faithfulness`
-(png + pdf), `faithfulness.csv`, `faithfulness_curves.csv`, `test_predictions.csv` (with TP/FN/FP/TN case),
+`fig_gradcam_cracked`, `fig_gradcam_cracked_vs_intact`, `fig_gradcam_failures`, `fig_faithfulness`,
+and for STR-1 models `fig_str1_graph` (png + pdf), `faithfulness.csv`, `faithfulness_curves.csv`, `test_predictions.csv` (with TP/FN/FP/TN case),
 `summary.json`, and a generated `README.md` with the faithfulness table.
 
 ## Metrics

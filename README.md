@@ -1,8 +1,9 @@
 # ViT from scratch on SDNET2018 — how to run
 
 Plain ViT (main model: **ViT-S/16**, identical to timm `vit_small_patch16_224`), trained from scratch for
-Cracked vs Non-cracked. Notes, recipe and design decisions: [docs/NOTES.md](docs/NOTES.md).
-Output files: [docs/OUTPUTS.md](docs/OUTPUTS.md).
+Cracked vs Non-cracked. Notes, recipe and design decisions: [docs/NOTES.md](docs/NOTES.md). STR-1 skeleton-graph attention
+(ViT and ResNet-style hybrid): [docs/STR1.md](docs/STR1.md).
+Output files: [docs/OUTPUTS.md](docs/OUTPUTS.md). **All experiment commands in order: [COMMANDS.md](COMMANDS.md).**
 
 The dataset is read from the LoopCrackViT folder (`../../code repo/Structural Defects Network (SDNET) 2018 archive`),
 set in `config.yaml` → `data_root`. Splits are the same CSVs as that repo (`runs/_splits/`).
@@ -15,6 +16,12 @@ python train.py --debug-subset 64 --epochs 2 --bootstrap 0 --output-dir runs_deb
 # 1. train ViT-S/16 (balanced split, defaults in config.yaml)
 python train.py --stem conv                                      # recommended main model (see NOTES finding)
 python train.py                                                  # plain patch-stem ViT-S/16 baseline
+
+# 1b. STR-1 skeleton-graph sparse attention (docs/STR1.md)
+python train.py --stem conv --attention str1                     # ViT-S/16 conv stem + STR-1
+python train.py --variant hyb_r26 --attention str1               # ResNet-style conv + STR-1 attention hybrid
+python train.py --variant hyb_r26 --attention mhsa               # same hybrid, dense attention (baseline)
+python train.py --variant hyb_r26 --hybrid-attn-stages ""        # same hybrid, no attention (plain ResNet)
 
 # 2. other variants
 python train.py --variant vit_ti16 --batch-size 128
@@ -43,7 +50,10 @@ python bench.py
 ```
 
 Every key in `config.yaml` is also a flag (`drop_path` → `--drop-path`). Run folders are named
-`<variant>[_conv][_gap]_bs<batch>_<split>_<augment>[tags]_s<seed>`, e.g. `runs/vit_s16_bs64_balanced_basic_s42/`.
+`<model>[_str1-...]_bs<batch>_lr<lr>_<split>_<augment>[tags]_s<seed>`, e.g.
+`runs/vit_s16_conv_str1-soft-k8-d1_bs64_lr0.0001_balanced_basic_s42/`.
+Every run prints the full model report (config, layer tree with output shapes and parameters, totals, GMACs)
+and saves it to `<run>/model.txt`. `python train.py --summary-only <flags>` prints it without training.
 
 | problem | fix |
 |---|---|
