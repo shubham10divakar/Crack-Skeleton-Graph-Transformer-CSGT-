@@ -1,0 +1,8 @@
+# run outputs and checkpoints (GBs) - keep only the cached splits
+runs/*
+!runs/_splits/
+runs_debug/
+*.pt
+*.npz
+__pycache__/
+*.pyc

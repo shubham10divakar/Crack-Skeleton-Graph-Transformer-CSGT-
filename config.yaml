@@ -1,0 +1,78 @@
+# ViT-S/16 from scratch on SDNET2018 - edit here, or override any key on the command line
+# (e.g. --variant vit_ti16 --batch-size 128). Keys use underscores; CLI flags use dashes.
+# Recipe notes and the reasoning behind every default: docs/NOTES.md
+
+# ---------------- data ----------------
+data_root: "D:/D/my docs/my docs/ideas/attention based works/Ai in civil engineering/Concrete Crack Classification/code repo/Structural Defects Network (SDNET) 2018 archive"
+split_mode: balanced           # balanced (paper protocol, 50/50, ~17k images) | random (full, 15% cracked) | group (no photo leakage)
+split_dir: runs/_splits        # cached split CSVs (copied from the LoopCrackViT repo -> identical images)
+val_frac: 0.15
+test_frac: 0.15
+augment: basic                 # none | basic (LoopCrackViT recipe) | strong (basic + RandAugment + RandomErasing)
+norm: half                     # half (mean/std 0.5, from scratch) | imagenet
+num_workers: 4                 # Windows: each worker is a full process; drop to 2 on MemoryError
+
+# ---------------- model (vit.py) ----------------
+# variant presets: vit_ti16 | vit_s16 | vit_s32 | vit_m16 | vit_b16 | vit_b32   (dim/depth/heads/patch)
+variant: vit_s16
+image_size: 224
+patch_size: null               # null = variant default; override e.g. --patch-size 8 (4x tokens, ~5x compute)
+dim: null                      # null = variant default
+depth: null
+num_heads: null
+mlp_ratio: 4.0
+qkv_bias: true
+stem: patch                    # patch (standard ViT) | conv (ViT_C conv stem, often better from scratch)
+pool: cls                      # cls (standard ViT) | gap (mean of patch tokens)
+dropout: 0.0
+attn_dropout: 0.0
+drop_path: 0.1                 # stochastic depth (DeiT: 0.1 for S/16; try 0.2 for B/16, 0.0 for Ti)
+layer_scale: 0.0               # >0 = LayerScale init (e.g. 0.0001); 0 = off (plain ViT)
+
+# ---------------- training ----------------
+epochs: 100
+batch_size: 64
+grad_accum: 1                  # effective batch = batch_size * grad_accum
+lr: 0.0001                     # peak LR (AdamW). 5e-4 stalled at chance with the patch stem (docs/NOTES.md)
+min_lr: 0.000001
+weight_decay: 0.05             # not applied to norms, biases, cls token, pos-embed
+warmup_epochs: 5               # linear warm-up (cosine only); ViTs from scratch need it
+scheduler: cosine              # cosine | plateau (ReduceLROnPlateau on val_loss)
+plateau_patience: 4
+plateau_factor: 0.5
+label_smoothing: 0.05
+class_weights: true            # balanced class weights on the loss (no-op on the 50/50 balanced split)
+grad_clip: 1.0                 # 0 = off
+amp: true                      # bf16 autocast on the RTX 3060
+ema_decay: 0.0                 # >0 keeps an EMA of the weights (e.g. 0.999); val/test/checkpoints-for-eval use it
+seed: 42
+device: auto
+output_dir: runs
+
+# ---------------- batch augmentation / class imbalance (all off by default) ----------------
+mixup_alpha: 0.0               # >0 enables MixUp (Beta(a, a)); 0.2 is a common start
+cutmix_alpha: 0.0              # >0 enables CutMix (Beta(a, a)); 1.0 is the standard value
+mixup_prob: 1.0                # probability a batch is mixed at all
+mixup_switch_prob: 0.5         # when both are on: probability of CutMix (else MixUp)
+imbalance: "off"               # off | oversample (balanced sampling) | smote (SMOTE-style minority synthesis)
+smote_target: 0.5              # smote: fraction of each batch that should be cracked
+smote_bank: 256                # smote: how many recent cracked images are kept for interpolation
+
+# ---------------- early stopping ----------------
+# monitor is computed on the validation set after every epoch:
+#   val_auc | val_ap | val_f1 | val_f2 | val_mcc | val_bal_acc | val_recall | val_loss
+monitor: val_auc
+early_stop_patience: 20        # null = never stop early (ViTs from scratch improve slowly; keep it generous)
+early_stop_min_delta: 0.0
+
+# ---------------- checkpoints / resume ----------------
+save_every: 1                  # epoch_NNNN.pt every N epochs (1 = every epoch; 0 = only best.pt / last.pt)
+epoch_ckpt: full               # full (resumable from any epoch, ~260 MB for S/16) | weights (eval only, ~87 MB)
+resume: null                   # null | auto (continue <run>/last.pt if it exists) | path/to/last.pt or epoch_NNNN.pt
+
+# ---------------- evaluation ----------------
+threshold_beta: 1.0            # val-tuned threshold maximises F-beta (2.0 favours recall)
+target_recall: 0.95            # also report the threshold that reaches this crack recall
+bootstrap: 1000                # bootstrap resamples for 95% CIs (0 = skip)
+summary_only: false            # print the model summary and exit
+debug_subset: 0                # >0: use only N images per split (pipeline smoke test)
