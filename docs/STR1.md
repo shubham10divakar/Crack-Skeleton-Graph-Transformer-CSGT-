@@ -10,7 +10,7 @@ graph, attention), used by `vit.py` and `hybrid.py`.
 |---|---|---|---|
 | ViT-S/16, conv stem, MHSA (reference) | `python train.py --stem conv --lr 0.0003` | 22.39 M | 366 |
 | **ViT-S/16, conv stem, STR-1** | `python train.py --stem conv --attention str1` | 22.39 M (+60) | 276 |
-| hybrid ResNet-26, attention off (plain ResNet) | `python train.py --variant hyb_r26 --hybrid-attn-stages ""` | 15.08 M | — |
+| hybrid ResNet-26, attention off (plain ResNet) | `python train.py --variant hyb_r26 --hybrid-attn-stages none` | 15.08 M | — |
 | hybrid ResNet-26, MHSA (BoTNet-style) | `python train.py --variant hyb_r26 --attention mhsa` | 13.13 M | 417 |
 | **hybrid ResNet-26, STR-1** | `python train.py --variant hyb_r26 --attention str1` | 13.13 M | 369 |
 | **hybrid ResNet-50, STR-1** | `python train.py --variant hyb_r50 --attention str1` | 19.30 M | 254 |

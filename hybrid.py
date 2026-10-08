@@ -39,7 +39,7 @@ class HybridConfig:
     arch: str = "hybrid"
     image_size: int = 224
     layers: tuple = (2, 2, 3, 2)
-    attn_stages: str = "3,4"         # stages (1-4) with attention blocks; "" = plain ResNet
+    attn_stages: str = "3,4"         # stages (1-4) with attention blocks; "" / "none" = plain ResNet
     head_dim: int = 64               # channels per attention head
     drop_path: float = 0.0
     attention: str = "str1"          # mhsa | str1
@@ -57,7 +57,10 @@ class HybridConfig:
 
     def __post_init__(self):
         self.layers = tuple(self.layers)
-        self.attn_stages = ",".join(str(int(s)) for s in str(self.attn_stages).replace(" ", "").split(",") if s)
+        s = "" if self.attn_stages is None else str(self.attn_stages).replace(" ", "")
+        if s.lower() in ("none", "null", "0"):     # PowerShell 5.1 drops "" args, so accept these for "no stages"
+            s = ""
+        self.attn_stages = ",".join(str(int(t)) for t in s.split(",") if t)
 
     @property
     def stages_with_attn(self):

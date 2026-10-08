@@ -25,7 +25,7 @@ python train.py                                                  # plain patch-s
 python train.py --stem conv --attention str1                     # ViT-S/16 conv stem + STR-1
 python train.py --variant hyb_r26 --attention str1               # ResNet-style conv + STR-1 attention hybrid
 python train.py --variant hyb_r26 --attention mhsa               # same hybrid, dense attention (baseline)
-python train.py --variant hyb_r26 --hybrid-attn-stages ""        # same hybrid, no attention (plain ResNet)
+python train.py --variant hyb_r26 --hybrid-attn-stages none      # same hybrid, no attention (plain ResNet)
 
 # 2. other variants
 python train.py --variant vit_ti16 --batch-size 128

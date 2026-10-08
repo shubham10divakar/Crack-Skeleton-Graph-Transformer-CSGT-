@@ -27,7 +27,7 @@ python train.py --stem conv --lr 0.0003 --attention str1             # STR-1 ske
 ## 2. ResNet-style hybrid: no attention vs dense attention vs STR-1
 
 ```powershell
-python train.py --variant hyb_r26 --hybrid-attn-stages ""            # plain ResNet-26 (conv only)
+python train.py --variant hyb_r26 --hybrid-attn-stages none          # plain ResNet-26 (conv only)
 python train.py --variant hyb_r26 --attention mhsa                   # BoTNet-style dense attention
 python train.py --variant hyb_r26 --attention str1                   # STR-1 attention
 python train.py --variant hyb_r50 --attention str1                   # bigger: ResNet-50 layout + STR-1

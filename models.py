@@ -35,7 +35,8 @@ def config_from_args(a):
                   str_dense_heads=a.str_dense_heads, str_coh_gate=a.str_coh_gate, str_prior=a.str_prior,
                   str_sigma=a.str_sigma, drop_path=a.drop_path)
     if a.variant in HYBRID_VARIANTS:
-        return HybridConfig.from_variant(a.variant, attn_stages=a.hybrid_attn_stages, **common)
+        stages = "" if a.hybrid_attn_stages is None else a.hybrid_attn_stages   # --hybrid-attn-stages none
+        return HybridConfig.from_variant(a.variant, attn_stages=stages, **common)
     if a.variant not in VARIANTS:
         raise SystemExit(f"--variant must be one of {', '.join(ALL_VARIANTS)}")
     return ViTConfig.from_variant(
