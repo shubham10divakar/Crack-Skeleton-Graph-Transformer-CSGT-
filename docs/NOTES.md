@@ -161,4 +161,61 @@ imbalanced set like the LoopCrackViT SMOTE run (add `--imbalance smote` or keep 
   `--images`); `aggregate.py`; conv stem, GAP pooling and LayerScale forward/backward on full-size S/16.
 * GPU (2026-10-07): `bench.py` for all variants (table above); 2-epoch ViT-S/16 run on 512 real images per
   split with bf16 (2.4 GB at batch 64).
-* **Not yet done:** a full training run, so there are no accuracy numbers yet.
+* **Not yet done (as of 2026-10-07):** a full training run. First numbers are in the next section.
+
+## First full runs (2026-10-08, balanced split, lr 1e-4, all still in progress / unfinished)
+
+The approach is named **Crack Skeleton-Graph Transformer (CSGT)** in the README; in the code it is STR-1.
+
+| run | best val AUC (epoch) | val acc range | train acc | status |
+|---|---|---|---|---|
+| `vit_s16_conv_str1-soft-k8-d1_bs64_lr0.0001` (ViT-S/16 + conv stem + CSGT) | 0.916 (≤77) | low–mid 0.80s | 0.83 @ 77 | stopped at epoch 77; re-run the same command to continue |
+| `hyb_r26-a0_bs64_lr0.0001` (plain ResNet-26, no attention) | 0.897 (26) | 0.80–0.83 | 0.79 @ 29 | running |
+| `vit_s16_conv_bs64_lr0.0003` (dense-attention baseline) | — | — | — | started only |
+
+Val AUC at matching epochs (CSGT ViT vs plain ResNet-26): epoch 10 0.732 vs 0.720, epoch 20 0.823 vs 0.879,
+epoch 26 0.855 vs 0.897. The CNN learns faster early (stronger inductive bias); the ViT keeps improving late.
+
+**Caveats for the paper**
+
+* The CSGT run used lr 1e-4 but the dense baseline uses lr 3e-4, so they are **not a fair comparison**. Run
+  `python train.py --stem conv --lr 0.0003 --attention str1` (COMMANDS.md §1); keep the lr 1e-4 run as an LR check.
+* The conv stem (Xiao et al. 2021) is not our contribution and is what makes ViT-S trainable here (finding above),
+  so CSGT's gain must be shown against **conv stem + dense attention**, not against the plain patch-stem ViT.
+  Ablation grid: {patch, conv} stem × {dense, CSGT}; patch + CSGT tests whether CSGT alone rescues the patch stem
+  (the skeleton graph is built from the input image, not from stem features).
+* Compare models on **AUC / AP**, not accuracy at the 0.5 threshold: recall/precision swing ±10 points between
+  epochs at a fixed threshold while AUC moves smoothly.
+* Val acc > train acc (~3 points) is expected, not a bug: train acc is measured with drop-path and augmentation
+  on, as a running average over the epoch; val uses the clean end-of-epoch network. A large (>10 point) gap that
+  persists late would mean over-regularisation. Check: score the train set in eval mode with `best.pt`.
+
+**Practical**
+
+* Two runs fit on the 3060 together (~5 GB each of 12 GB), but one run already keeps the GPU at ~94%, so in
+  parallel each runs at ~half speed and total time is the same. Run sequentially unless away.
+* Windows PowerShell 5.1 drops `""` arguments: use `--hybrid-attn-stages none` (or `0`) for a plain ResNet.
+
+## Getting above ~92% accuracy (plan, 2026-10-08)
+
+92% accuracy on the **balanced** split, from scratch, is unlikely for any architecture: SDNET is limited by
+data, not model (hairline cracks vs joints / shadows / texture, label noise, only 11,877 training images after
+undersampling). Published 90%+ numbers are usually pretrained (ImageNet) or on the imbalanced split, where ~85%
+of images are Non-cracked and accuracy is inflated. Realistic levers, by expected gain:
+
+1. **Use all the data (biggest lever).** The balanced split drops 39,124 Non-cracked images *before* splitting.
+   Train on the full ~39k-image training pool with class weights or a balanced sampler, keep the **test** set
+   balanced so it stays comparable. Needs a small code change (e.g. a `--train-full` option); not implemented yet.
+2. **Self-supervised pretraining on SDNET itself** (MAE or DINO on all 56k images, no labels), then fine-tune.
+   Still "from scratch" (no external data); usually the largest single gain for ViTs on small data.
+3. **Stronger recipe (flags already exist):** `--ema-decay 0.999`, `--epochs 200 --early-stop-patience 40`,
+   `--mixup-alpha 0.2`, stronger augmentation, LR 3e-4 vs 1e-4. Expect ~1–3 points.
+4. **Architectures with conv inductive bias:** CNNs (ResNet, ConvNeXt-T) and hybrids usually beat plain ViTs from
+   scratch on small data; plain ResNet-26 is already ahead of the ViT at matching epochs, so
+   **hybrid ResNet-26 + CSGT** (`--variant hyb_r26 --attention str1`) may be the best model.
+5. **Cheap final gains:** ensemble of 3–5 seeds, test-time augmentation (flips), accuracy-optimal threshold
+   instead of 0.5. ~0.5–1.5 points each.
+
+Order: 1 + 3 first (~a day of GPU, helps every model) → hybrid + CSGT → 2 if a large jump is still needed.
+The paper's headline claim should be "CSGT beats dense attention under the same recipe" (AUC), which is stronger
+than any single accuracy number.
