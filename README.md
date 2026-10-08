@@ -8,6 +8,10 @@ Output files: [docs/OUTPUTS.md](docs/OUTPUTS.md). **All experiment commands in o
 The dataset is read from the LoopCrackViT folder (`../../code repo/Structural Defects Network (SDNET) 2018 archive`),
 set in `config.yaml` → `data_root`. Splits are the same CSVs as that repo (`runs/_splits/`).
 
+**Our approach: Crack Skeleton-Graph Transformer (CSGT).** A crack is a graph (a skeleton with branches), so each
+token attends only along plausible skeleton edges. This is STR-1 skeleton-graph sparse attention in the code
+(`--attention str1`); main model: ViT-S/16, conv stem + STR-1 in all 12 blocks (`--stem conv --attention str1`).
+
 ```powershell
 # 0. check the model / pipeline (no GPU time)
 python train.py --summary-only
