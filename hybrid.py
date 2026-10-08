@@ -1,6 +1,6 @@
 """
 ResNet-style convolution + attention hybrid (in the spirit of BoTNet, Srinivas et al. 2021) whose attention
-blocks use STR-1 skeleton-graph sparse attention (geometry.py, docs/STR1.md). Trained from scratch.
+blocks use STR-1 skeleton-graph sparse attention (geometry.py, docs/STR1.md). Trained from scratch, or from ImageNet ResNet-D weights with --pretrained.
 
     stem   3x3/2 (32) -> 3x3 (32) -> 3x3 (64) -> maxpool/2                     ResNet-D stem, 56x56
     stage1 bottleneck x L1   width  64 -> 256 ch                            56x56   conv

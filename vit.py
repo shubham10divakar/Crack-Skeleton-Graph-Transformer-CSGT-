@@ -1,6 +1,6 @@
 """
 Plain Vision Transformer (Dosovitskiy et al. 2021 / DeiT recipe) for binary SDNET2018 crack classification,
-written to be trained FROM SCRATCH (no pretrained weights are ever loaded).
+written to be trained from scratch (ImageNet init only with --pretrained, see pretrained.py).
 
     image -> stem (16x16 patchify, or a small conv stem) -> [CLS] + learned pos-embed
           -> depth x [ LN -> MHSA -> (LayerScale) -> DropPath  +  LN -> MLP -> (LayerScale) -> DropPath ]

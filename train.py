@@ -47,8 +47,9 @@ except ImportError:
 
 import metrics as M
 from augment import MinorityBank, mix_batch, smote_batch
-from data import build_loaders, data_summary, load_split
+from data import add_full_train, build_loaders, data_summary, load_split
 from paper import write_report
+from pretrained import load_pretrained, source_for
 from modelinfo import model_report
 from models import arch_tag, config_from_args, model_from_cfg, normalized
 
@@ -56,7 +57,13 @@ MINIMISE = {"val_loss"}
 # flags that change the optimisation; a resume with different values is allowed but warned about
 RESUME_CHECK = ("split_mode", "seed", "augment", "batch_size", "grad_accum", "lr", "min_lr", "weight_decay",
                 "warmup_epochs", "epochs", "scheduler", "label_smoothing", "class_weights", "grad_clip", "ema_decay",
-                "mixup_alpha", "cutmix_alpha", "imbalance", "monitor")
+                "mixup_alpha", "cutmix_alpha", "imbalance", "monitor", "drop_path", "train_full", "pretrained",
+                "pretrained_model", "norm")
+# optimisation flags tagged in the run name when they differ from config.yaml, so runs that differ only in
+# these get their own folder (otherwise resume: auto would silently continue the other run's last.pt)
+NAME_TAGS = (("epochs", "ep"), ("warmup_epochs", "wu"), ("drop_path", "dp"), ("weight_decay", "wd"),
+             ("label_smoothing", "ls"), ("min_lr", "minlr"), ("scheduler", ""))
+DEFAULTS = {}                                   # config.yaml values, filled by get_args()
 
 
 class ConsoleLog:
@@ -102,6 +109,7 @@ def get_args():
     pre, _ = p.parse_known_args()
     with open(pre.config, encoding="utf8") as f:
         cfg = {k.replace("-", "_"): v for k, v in (yaml.safe_load(f) or {}).items()}
+    DEFAULTS.update(cfg)
     for k, v in cfg.items():                    # one flag per YAML key, typed from its default
         flag = "--" + k.replace("_", "-")
         if isinstance(v, bool):
@@ -126,7 +134,10 @@ def get_args():
 
 def run_name(a, c):
     tag = ((f"_cut{a.cutmix_alpha:g}" if a.cutmix_alpha > 0 else "") + (f"_mix{a.mixup_alpha:g}" if a.mixup_alpha > 0 else "")
-           + (f"_{a.imbalance}" if a.imbalance != "off" else "") + (f"_ema" if a.ema_decay > 0 else ""))
+           + (f"_{a.imbalance}" if a.imbalance != "off" else "") + (f"_ema" if a.ema_decay > 0 else "")
+           + "".join(f"_{t}{getattr(a, k):g}" if isinstance(getattr(a, k), (int, float)) else f"_{getattr(a, k)}"
+                     for k, t in NAME_TAGS if k in DEFAULTS and getattr(a, k) != DEFAULTS[k])
+           + ("_full" if a.train_full else "") + ("_in1k" if a.pretrained else ""))
     return f"{arch_tag(c)}_bs{a.batch_size * a.grad_accum}_lr{a.lr:g}_{a.split_mode}_{a.augment}{tag}_s{a.seed}"
 
 
@@ -309,11 +320,16 @@ def main():
     args.imbalance = args.imbalance or "off"
     if args.imbalance not in ("off", "oversample", "smote"):
         raise SystemExit("--imbalance must be off | oversample | smote")
+    if args.train_full and args.split_mode != "balanced":
+        raise SystemExit("--train-full only applies to split_mode balanced (random / group already use all images)")
     if args.epoch_ckpt not in ("full", "weights"):
         raise SystemExit("--epoch-ckpt must be full | weights")
     if args.imbalance != "off" and args.class_weights:
         print(f"[note] --imbalance {args.imbalance} already rebalances the classes, so loss class weights are turned off")
         args.class_weights = False
+    if args.pretrained and args.norm != "imagenet":
+        print(f"[note] --pretrained: input normalisation {args.norm} -> imagenet (the statistics the weights expect)")
+        args.norm = "imagenet"
     seed_all(args.seed)
     device = pick_device(args.device)
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
@@ -322,17 +338,21 @@ def main():
     mcfg = config_from_args(args)
     model = model_from_cfg(mcfg.to_dict()).to(device)
     name = run_name(args, mcfg)
-    print(f">>> RUN {name}  (from scratch, no pretrained weights)")
+    init = (f"ImageNet-pretrained init: {source_for(mcfg, args.pretrained_model)}" if args.pretrained
+            else "from scratch, no pretrained weights")
+    print(f">>> RUN {name}  ({init})")
     report = model_report(model, mcfg, device)
     print(report)
     if args.summary_only:
         return
 
-    out = os.path.join(args.output_dir, name)
+    out = os.path.join(args.output_dir, "pretrained" if args.pretrained else "", name)   # kept apart from scratch runs
     if args.resume == "auto":
         last = os.path.join(out, "last.pt")
         args.resume = last if os.path.exists(last) else None
         print(f"--resume auto: {'continuing ' + last if args.resume else 'no last.pt yet, starting fresh'}")
+    if args.pretrained and not args.resume:            # a resumed run gets its weights from the checkpoint
+        print(load_pretrained(model, mcfg, args.pretrained_model))
 
     use_amp = args.amp and device.type == "cuda"
     amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
@@ -355,9 +375,11 @@ def main():
 
     # ---- data ----------------------------------------------------------------
     df = load_split(args.data_root, args.split_mode, args.seed, args.split_dir, args.val_frac, args.test_frac)
+    if args.train_full:
+        df = add_full_train(df, args.data_root)
     if args.debug_subset:       # quick pipeline test: N images per split (both classes kept)
         df = df.groupby(["split", "label"], group_keys=False).head(args.debug_subset // 2)
-    print("\n" + data_summary(df, args.split_mode, args.data_root))
+    print("\n" + data_summary(df, "balanced+full-train" if args.train_full else args.split_mode, args.data_root))
     train_loader, val_loader, test_loader, (tr_df, va_df, te_df) = build_loaders(
         df, args.image_size, args.batch_size, args.num_workers, args.augment, pin_memory=device.type == "cuda",
         seed=args.seed, norm=args.norm, oversample=args.imbalance == "oversample")

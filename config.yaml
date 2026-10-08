@@ -5,6 +5,7 @@
 # ---------------- data ----------------
 data_root: "D:/D/my docs/my docs/ideas/attention based works/Ai in civil engineering/Concrete Crack Classification/code repo/Structural Defects Network (SDNET) 2018 archive"
 split_mode: balanced           # balanced (paper protocol, 50/50, ~17k images) | random (full, 15% cracked) | group (no photo leakage)
+train_full: false              # balanced only: also train on the ~39k Non-cracked images undersampling dropped (val/test unchanged)
 split_dir: runs/_splits        # cached split CSVs (copied from the LoopCrackViT repo -> identical images)
 val_frac: 0.15
 test_frac: 0.15
@@ -30,6 +31,9 @@ attn_dropout: 0.0
 drop_path: 0.1                 # stochastic depth (DeiT: 0.1 for S/16; try 0.2 for B/16, 0.0 for Ti)
 layer_scale: 0.0               # >0 = LayerScale init (e.g. 0.0001); 0 = off (plain ViT)
 hybrid_attn_stages: "3,4"      # hybrid only: stages with attention blocks ("4" = BoTNet, none = plain ResNet)
+
+pretrained: false              # true = start from ImageNet weights (pretrained.py); runs go to runs/pretrained/, norm -> imagenet
+pretrained_model: null         # override the timm checkpoint (default per variant: pretrained.py SOURCES)
 
 # ---------------- attention (both architectures; docs/STR1.md) ----------------
 attention: mhsa                # mhsa (dense) | str1 (STR-1 skeleton-graph sparse attention)

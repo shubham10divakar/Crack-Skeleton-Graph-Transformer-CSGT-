@@ -205,7 +205,8 @@ of images are Non-cracked and accuracy is inflated. Realistic levers, by expecte
 
 1. **Use all the data (biggest lever).** The balanced split drops 39,124 Non-cracked images *before* splitting.
    Train on the full ~39k-image training pool with class weights or a balanced sampler, keep the **test** set
-   balanced so it stays comparable. Needs a small code change (e.g. a `--train-full` option); not implemented yet.
+   balanced so it stays comparable. Implemented as `--train-full` (2026-10-08): train grows to 51,001 images (11.6% cracked), val / test
+   are the identical balanced images. Use with `--imbalance oversample` or the default class weights.
 2. **Self-supervised pretraining on SDNET itself** (MAE or DINO on all 56k images, no labels), then fine-tune.
    Still "from scratch" (no external data); usually the largest single gain for ViTs on small data.
 3. **Stronger recipe (flags already exist):** `--ema-decay 0.999`, `--epochs 200 --early-stop-patience 40`,

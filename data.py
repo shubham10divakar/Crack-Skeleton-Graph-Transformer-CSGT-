@@ -8,7 +8,9 @@ SDNET files are patches cut from larger photos ("7001-115.jpg" = photo 7001, pat
 A random patch-level split therefore leaks near-identical neighbouring patches between
 train and test. split_mode:
     balanced          - CrackNeXt protocol: per surface, undersample Non-cracked to the Cracked count
-                        (~17k images, 50/50), then the patch-level random split (the paper protocol)
+                        (~17k images, 50/50), then the patch-level random split (the paper protocol).
+                        With --train-full the dropped Non-cracked images are added to train only
+                        (val / test unchanged), see add_full_train()
     random            - patch-level split on the full imbalanced set (56,092 images, 15.1% cracked)
     group             - all patches of one source photo stay in the same split (no leakage; hardest)
 All are stratified on surface x label, 70/15/15. The split is cached to a CSV so every run of the
@@ -105,6 +107,18 @@ def load_split(root, mode, seed, cache_dir, val_frac=0.15, test_frac=0.15):
     return df
 
 
+def add_full_train(df, root):
+    """--train-full: add every image the balanced split dropped (undersampled Non-cracked) to TRAIN only.
+    val / test stay exactly the cached balanced images, so test numbers remain comparable with balanced runs.
+    The train set becomes ~15% cracked; rebalance with class_weights (default) or --imbalance oversample.
+    Images are matched on <surface>/<label>/<file>, so a moved data_root still lines up."""
+    key = lambda d: d["surface"] + "/" + d["label"].astype(str) + "/" + d["path"].map(os.path.basename)
+    full = scan_sdnet(root)
+    extra = full[~key(full).isin(set(key(df)))].copy()
+    extra["split"] = "train"
+    return pd.concat([df, extra[df.columns]]).sort_values("path").reset_index(drop=True)
+
+
 def build_transforms(size, augment="basic", norm="half"):
     """none   : resize only (val / test)
     basic  : the LoopCrackViT recipe - flips, affine (20 deg, 15% shift, 0.85-1.15 scale), brightness
@@ -192,6 +206,9 @@ def data_summary(df, mode, root=None):
     lines += [per.to_string(), "",
               f"TOTAL {len(df):,} images: {int((df.label == 0).sum()):,} Non-cracked + "
               f"{int(df.label.sum()):,} Cracked ({100 * df.label.mean():.1f}% cracked)"]
+    if mode == "balanced+full-train":
+        lines += ["", "train-full: the Non-cracked images undersampling dropped were added to TRAIN only; "
+                      "val / test are the unchanged balanced splits"]
     if mode == "balanced" and root:
         try:
             full = scan_sdnet(root)
