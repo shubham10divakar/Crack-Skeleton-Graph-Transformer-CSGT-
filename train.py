@@ -6,7 +6,8 @@ Train a Vision Transformer FROM SCRATCH on SDNET2018 (binary: Cracked vs Non-cra
     python train.py --variant vit_ti16 --batch-size 128
     python train.py --stem conv --attention str1      # ViT-S/16 conv stem + STR-1 skeleton-graph attention
     python train.py --variant hyb_r26                 # ResNet-style conv + STR-1 attention hybrid
-    python train.py --resume auto                     # continue <run>/last.pt (same flags as the run)
+    python train.py                                   # re-running the same command continues <run>/last.pt (resume: auto)
+    python train.py --resume null                     # start the run over from epoch 1 (overwrites runs/<run>/)
     python train.py --resume runs/<run>/epoch_0030.pt # restart from any saved epoch
 
 Flags override the YAML (every key in config.yaml is a flag: `drop_path` -> `--drop-path`).

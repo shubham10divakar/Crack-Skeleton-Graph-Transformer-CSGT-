@@ -5,7 +5,7 @@ How the code works: [README.md](README.md). STR-1 design: [docs/STR1.md](docs/ST
 
 Every run prints the full model report (also saved to `runs/<run>/model.txt`), writes `best.pt`, `last.pt` and
 `epoch_NNNN.pt` every epoch, stops early on val ROC-AUC (patience 20), then evaluates on test.
-**If a run is interrupted, re-run the same command with `--resume auto` added.**
+**If a run is interrupted, re-run the same command: it continues from `last.pt` (`resume: auto` is the default). Add `--resume null` to start over.**
 
 ## 0. Check before training (no GPU time)
 
@@ -71,7 +71,8 @@ python aggregate.py                                  # all finished runs -> runs
 ## 7. Resume / restart
 
 ```powershell
-<same command as the run> --resume auto                              # continue from last.pt
+<same command as the run>                                            # continue from last.pt (resume: auto is the default)
+<same command as the run> --resume null                              # start over from epoch 1 (overwrites the run)
 <same command as the run> --resume runs/<run>/epoch_0030.pt          # restart from a chosen epoch
 ```
 

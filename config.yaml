@@ -83,7 +83,7 @@ early_stop_min_delta: 0.0
 # ---------------- checkpoints / resume ----------------
 save_every: 1                  # epoch_NNNN.pt every N epochs (1 = every epoch; 0 = only best.pt / last.pt)
 epoch_ckpt: full               # full (resumable from any epoch, ~260 MB for S/16) | weights (eval only, ~87 MB)
-resume: null                   # null | auto (continue <run>/last.pt if it exists) | path/to/last.pt or epoch_NNNN.pt
+resume: auto                   # auto (continue <run>/last.pt if it exists) | null (start fresh, overwrites the run) | path/to/last.pt or epoch_NNNN.pt
 
 # ---------------- evaluation ----------------
 threshold_beta: 1.0            # val-tuned threshold maximises F-beta (2.0 favours recall)

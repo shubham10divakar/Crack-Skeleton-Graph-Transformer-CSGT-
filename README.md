@@ -29,7 +29,8 @@ python train.py --variant vit_s32  --batch-size 128
 python train.py --variant vit_b16  --batch-size 64 --drop-path 0.2
 
 # 3. resume (same flags as the original run)
-python train.py --resume auto                                    # continue from last.pt
+python train.py                                                  # re-run the same command: continues from last.pt
+python train.py --resume null                                    # start over from epoch 1 (overwrites the run)
 python train.py --resume runs/<run>/epoch_0030.pt                # restart from any epoch
 
 # 4. evaluate a checkpoint / every saved epoch

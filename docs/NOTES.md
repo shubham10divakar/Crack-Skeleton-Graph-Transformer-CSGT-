@@ -132,8 +132,8 @@ imbalanced set like the LoopCrackViT SMOTE run (add `--imbalance smote` or keep 
 * Early stopping: `--monitor` (val_auc, val_ap, val_f1, val_f2, val_mcc, val_bal_acc, val_recall, val_loss),
   `--early-stop-patience` (null = never), `--early-stop-min-delta`. The test set is never used for stopping,
   checkpoint choice or thresholds.
-* `--resume auto` continues `runs/<run>/last.pt` if it exists (else starts fresh), so the same command can be
-  re-run after a crash or reboot. `--resume <path>` restarts from any full checkpoint; `best.pt` and `log.csv`
+* `resume: auto` (the default) continues `runs/<run>/last.pt` if it exists (else starts fresh), so the same command can be
+  re-run after a crash or reboot; `--resume null` forces a fresh start. `--resume <path>` restarts from any full checkpoint; `best.pt` and `log.csv`
   are rewritten to that point. Resume refuses a different model config and **warns** if training flags (lr,
   batch size, epochs, …) differ. Changing `--epochs` changes the cosine schedule from that point on.
 * RNG states are restored on resume. The data loader's shuffle order is not, so a resumed run is close to an
