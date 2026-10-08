@@ -9,7 +9,7 @@ train_full: false              # balanced only: also train on the ~39k Non-crack
 split_dir: runs/_splits        # cached split CSVs (copied from the LoopCrackViT repo -> identical images)
 val_frac: 0.15
 test_frac: 0.15
-augment: basic                 # none | basic (LoopCrackViT recipe) | strong (basic + RandAugment + RandomErasing)
+augment: basic                 # none | basic (LoopCrackViT recipe) | strong (basic + RandAugment + RandomErasing) | cracknext
 norm: half                     # half (mean/std 0.5, from scratch) | imagenet
 num_workers: 4                 # Windows: each worker is a full process; drop to 2 on MemoryError
 
@@ -49,6 +49,9 @@ str_prior: ridge               # ridge (Hessian dark-line, default) | gradient (
 str_sigma: 2.0                 # ridge prior: Gaussian scale in pixels (~ crack half-width)
 
 # ---------------- training ----------------
+task: binary                   # binary (Cracked vs Non-cracked) | six (surface x crack, CrackNeXt protocol; binary metrics still reported)
+optimizer: adamw               # adamw | sgd (momentum; the CrackNeXt recipe: SGD lr 0.01, wd 2e-5)
+momentum: 0.9                  # sgd only
 epochs: 100
 batch_size: 64
 grad_accum: 1                  # effective batch = batch_size * grad_accum
@@ -80,6 +83,7 @@ smote_bank: 256                # smote: how many recent cracked images are kept 
 # ---------------- early stopping ----------------
 # monitor is computed on the validation set after every epoch:
 #   val_auc | val_ap | val_f1 | val_f2 | val_mcc | val_bal_acc | val_recall | val_loss
+#   (--task six also: val_acc6 | val_f1m6 = 6-class accuracy / macro F1)
 monitor: val_auc
 early_stop_patience: 20        # null = never stop early (ViTs from scratch improve slowly; keep it generous)
 early_stop_min_delta: 0.0

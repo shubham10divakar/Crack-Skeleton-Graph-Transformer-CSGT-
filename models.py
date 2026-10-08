@@ -9,10 +9,24 @@ hybrid existed have no "arch" key and are ViTs).
 """
 from __future__ import annotations
 
+import torch
+
 from hybrid import HYBRID_VARIANTS, HybridConfig, HybridNet
 from vit import VARIANTS, ViT, ViTConfig
 
 ALL_VARIANTS = list(VARIANTS) + list(HYBRID_VARIANTS)
+# --task six (CrackNeXt protocol): class index = 2 * surface + cracked
+SIX_CLASSES = [f"{s}_{c}" for s in ("Decks", "Pavements", "Walls") for c in ("Non-cracked", "Cracked")]
+
+
+def crack_logit(out):
+    """Model output -> Cracked logit. A 6-class output collapses to log P(cracked) - log P(non-cracked) over the
+    surfaces, so sigmoid() of it is exactly the summed softmax of the three Cracked classes; every binary metric,
+    threshold and Grad-CAM therefore works unchanged for both tasks."""
+    if out.ndim == 1:
+        return out
+    out = out.float()
+    return torch.logsumexp(out[:, 1::2], 1) - torch.logsumexp(out[:, 0::2], 1)
 
 
 def config_from_dict(d):
@@ -33,7 +47,7 @@ def config_from_args(a):
     common = dict(image_size=a.image_size, attention=a.attention, str_k=a.str_k, str_radius=a.str_radius,
                   str_alpha=a.str_alpha, str_beta=a.str_beta, str_rho=a.str_rho, str_mode=a.str_mode,
                   str_dense_heads=a.str_dense_heads, str_coh_gate=a.str_coh_gate, str_prior=a.str_prior,
-                  str_sigma=a.str_sigma, drop_path=a.drop_path)
+                  str_sigma=a.str_sigma, drop_path=a.drop_path, num_outputs=6 if a.task == "six" else 1)
     if a.variant in HYBRID_VARIANTS:
         stages = "" if a.hybrid_attn_stages is None else a.hybrid_attn_stages   # --hybrid-attn-stages none
         return HybridConfig.from_variant(a.variant, attn_stages=stages, **common)
@@ -50,7 +64,7 @@ def arch_tag(c):
     if c.arch == "hybrid":
         tag = f"{c.variant}-a{c.attn_stages.replace(',', '') or '0'}"
         if not c.attn_stages:
-            return tag
+            return tag + ("_6c" if c.num_outputs == 6 else "")
     else:
         d = ViTConfig.from_variant(c.variant)
         tag = c.variant
@@ -58,6 +72,7 @@ def arch_tag(c):
             tag += f"-d{c.dim}x{c.depth}h{c.num_heads}p{c.patch_size}"
         tag += ("_conv" if c.stem == "conv" else "") + ("_gap" if c.pool == "gap" else "")
     tag += f"_r{c.image_size}" if c.image_size != 224 else ""
+    tag += "_6c" if c.num_outputs == 6 else ""
     if c.attention == "str1":
         s = HybridConfig()                                   # defaults (same for both architectures)
         tag += f"_str1-{c.str_mode}-k{c.str_k}-d{c.str_dense_heads}"

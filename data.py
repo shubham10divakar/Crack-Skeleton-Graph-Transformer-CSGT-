@@ -34,7 +34,7 @@ LABELS = {"Non-cracked": 0, "Cracked": 1}
 CLASS_NAMES = ["Non-cracked", "Cracked"]
 NORMS = {"half": ((0.5,) * 3, (0.5,) * 3),                       # from-scratch default
          "imagenet": ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))}
-AUG_LEVELS = ("none", "basic", "strong")
+AUG_LEVELS = ("none", "basic", "strong", "cracknext")
 
 
 def scan_sdnet(root):
@@ -119,12 +119,22 @@ def add_full_train(df, root):
     return pd.concat([df, extra[df.columns]]).sort_values("path").reset_index(drop=True)
 
 
+def add_six_class(df):
+    """--task six (CrackNeXt protocol): cls6 = 2 * surface index + label (Decks_Non-cracked = 0 ... Walls_Cracked = 5)."""
+    df = df.copy()
+    df["cls6"] = df["surface"].map({s: i for i, s in enumerate(SURFACES)}) * 2 + df["label"]
+    return df
+
+
 def build_transforms(size, augment="basic", norm="half"):
     """none   : resize only (val / test)
     basic  : the LoopCrackViT recipe - flips, affine (20 deg, 15% shift, 0.85-1.15 scale), brightness
     strong : basic + RandAugment(2, 9) + RandomErasing(p=0.25). ViTs trained from scratch on ~10-40k
              images over-fit fast; this is closer to the DeiT recipe. Erasing can hide a thin crack while
-             the label stays Cracked, so treat it as an ablation (compare on validation)."""
+             the label stays Cracked, so treat it as an ablation (compare on validation).
+    cracknext : the CrackNeXt recipe (Ozdemir et al. 2026, sec. 3.3): random resized crop, rotation, h/v flips,
+             affine, colour jitter, random grayscale, Gaussian blur, Gaussian noise. The paper gives no
+             magnitudes; these are moderate values (crop scale >= 0.6 so a thin crack is rarely cropped away)."""
     if augment is True:
         augment = "basic"
     if augment in (False, None):
@@ -140,14 +150,25 @@ def build_transforms(size, augment="basic", norm="half"):
              v2.ColorJitter(brightness=(0.8, 1.2))]
     if augment == "basic":
         return v2.Compose(ev + basic + tail)
+    if augment == "cracknext":
+        return v2.Compose([
+            v2.RandomResizedCrop((size, size), scale=(0.6, 1.0), antialias=True),
+            v2.RandomRotation(15), v2.RandomHorizontalFlip(), v2.RandomVerticalFlip(),
+            v2.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=10),
+            v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02), v2.RandomGrayscale(p=0.1),
+            v2.RandomApply([v2.GaussianBlur(3, sigma=(0.1, 1.5))], p=0.2),
+            v2.ToImage(), v2.ToDtype(torch.float32, scale=True),
+            v2.RandomApply([v2.GaussianNoise(mean=0.0, sigma=0.03)], p=0.2),
+            v2.Normalize(*NORMS[norm])])
     return v2.Compose(ev + basic + [v2.RandAugment(num_ops=2, magnitude=9)] + tail
                       + [v2.RandomErasing(p=0.25, value=0)])
 
 
 class CrackDataset(Dataset):
-    def __init__(self, df, transform):
+    def __init__(self, df, transform, target="label"):
+        """target: label (binary, float for BCE) | cls6 (6-class index for --task six)."""
         self.paths = df["path"].tolist()
-        self.labels = df["label"].to_numpy().astype("float32")
+        self.labels = df[target].to_numpy().astype("float32" if target == "label" else "int64")
         self.transform = transform
 
     def __len__(self):
@@ -167,7 +188,7 @@ def loader_kw(workers, persistent, pin_memory):
 
 
 def build_loaders(df, image_size, batch_size, num_workers, augment="basic", pin_memory=True, seed=42,
-                  norm="half", oversample=False):
+                  norm="half", oversample=False, target="label"):
     tr, va, te = (df[df["split"] == s].reset_index(drop=True) for s in ("train", "val", "test"))
     gen = torch.Generator().manual_seed(seed)
     if oversample:      # every image drawn with probability ~ 1/(size of its class): batches are ~50% cracked
@@ -177,13 +198,13 @@ def build_loaders(df, image_size, batch_size, num_workers, augment="basic", pin_
         order = dict(sampler=sampler)
     else:
         order = dict(shuffle=True, generator=gen)
-    train_loader = DataLoader(CrackDataset(tr, build_transforms(image_size, augment, norm)),
+    train_loader = DataLoader(CrackDataset(tr, build_transforms(image_size, augment, norm), target),
                               batch_size=batch_size, drop_last=len(tr) > batch_size, **order,
                               **loader_kw(num_workers, True, pin_memory))
     ev_tf = build_transforms(image_size, "none", norm)
-    val_loader = DataLoader(CrackDataset(va, ev_tf), batch_size=batch_size * 2, shuffle=False,
+    val_loader = DataLoader(CrackDataset(va, ev_tf, target), batch_size=batch_size * 2, shuffle=False,
                             **loader_kw(min(2, num_workers), True, pin_memory))
-    test_loader = DataLoader(CrackDataset(te, ev_tf), batch_size=batch_size * 2, shuffle=False,
+    test_loader = DataLoader(CrackDataset(te, ev_tf, target), batch_size=batch_size * 2, shuffle=False,
                              **loader_kw(min(2, num_workers), False, pin_memory))
     return train_loader, val_loader, test_loader, (tr, va, te)
 

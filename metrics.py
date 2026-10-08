@@ -86,3 +86,13 @@ def bootstrap_ci(y, p, thr, keys=("auc", "ap", "f1", "recall", "precision", "mcc
             acc[k].append(m[k])
     return {k: (float(np.percentile(v, 100 * alpha / 2)), float(np.percentile(v, 100 * (1 - alpha / 2))))
             for k, v in acc.items()}
+
+
+def six_class(y, p):
+    """--task six: y (N,) class index, p (N, 6) softmax -> accuracy, macro precision / recall / F1 (CrackNeXt's
+    SDNET2018 metrics) and the 6x6 confusion matrix (rows = true, cols = predicted)."""
+    from sklearn.metrics import precision_recall_fscore_support
+    y, pred = np.asarray(y).astype(int), np.asarray(p).argmax(1)
+    pr, rc, f1, _ = precision_recall_fscore_support(y, pred, labels=range(6), average="macro", zero_division=0)
+    return dict(acc6=float((pred == y).mean()), precision_m6=float(pr), recall_m6=float(rc), f1m6=float(f1),
+                cm6=confusion_matrix(y, pred, labels=range(6)))

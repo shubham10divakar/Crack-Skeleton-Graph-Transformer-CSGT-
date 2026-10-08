@@ -253,7 +253,7 @@ class ViT(nn.Module):
         out.append(f"  {'stem':<28}{rows['stem']:>16,}")
         out.append(f"  {'cls+pos_embed':<28}{rows['cls+pos_embed']:>16,}")
         out.append(f"  {f'blocks x{len(blk)} (each)':<28}{rows[blk[0]]:>16,}")
-        out.append(f"  {'norm+head (1 logit)':<28}{rows['norm+head']:>16,}")
+        out.append(f"  {f'norm+head ({c.num_outputs} logit' + ('s)' if c.num_outputs > 1 else ')'):<28}{rows['norm+head']:>16,}")
         out += [line, f"  {'TOTAL parameters':<28}{r['total_params']:>16,}  ({r['total_params'] / 1e6:.2f}M)", line]
         return "\n".join(out)
 

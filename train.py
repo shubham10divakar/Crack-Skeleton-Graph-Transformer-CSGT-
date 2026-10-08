@@ -47,22 +47,23 @@ except ImportError:
 
 import metrics as M
 from augment import MinorityBank, mix_batch, smote_batch
-from data import add_full_train, build_loaders, data_summary, load_split
+from data import add_full_train, add_six_class, build_loaders, data_summary, load_split
 from paper import write_report
 from pretrained import load_pretrained, source_for
 from modelinfo import model_report
-from models import arch_tag, config_from_args, model_from_cfg, normalized
+from models import SIX_CLASSES, arch_tag, config_from_args, crack_logit, model_from_cfg, normalized
 
 MINIMISE = {"val_loss"}
 # flags that change the optimisation; a resume with different values is allowed but warned about
 RESUME_CHECK = ("split_mode", "seed", "augment", "batch_size", "grad_accum", "lr", "min_lr", "weight_decay",
                 "warmup_epochs", "epochs", "scheduler", "label_smoothing", "class_weights", "grad_clip", "ema_decay",
                 "mixup_alpha", "cutmix_alpha", "imbalance", "monitor", "drop_path", "train_full", "pretrained",
-                "pretrained_model", "norm")
+                "pretrained_model", "norm", "task", "optimizer", "momentum")
 # optimisation flags tagged in the run name when they differ from config.yaml, so runs that differ only in
 # these get their own folder (otherwise resume: auto would silently continue the other run's last.pt)
 NAME_TAGS = (("epochs", "ep"), ("warmup_epochs", "wu"), ("drop_path", "dp"), ("weight_decay", "wd"),
-             ("label_smoothing", "ls"), ("min_lr", "minlr"), ("scheduler", ""))
+             ("label_smoothing", "ls"), ("min_lr", "minlr"), ("scheduler", ""), ("optimizer", ""),
+             ("momentum", "mom"))
 DEFAULTS = {}                                   # config.yaml values, filled by get_args()
 
 
@@ -264,9 +265,16 @@ def bce_loss(logits, y, smoothing, cw):
     return (F.binary_cross_entropy_with_logits(logits.float(), t, reduction="none") * w).mean()
 
 
+def ce_loss(logits, y, smoothing, cw):
+    """--task six: soft-target cross-entropy (y one-hot, or mixed by MixUp/CutMix), label smoothing, class weights."""
+    t = y * (1 - smoothing) + smoothing / y.shape[1]
+    return (-(t * F.log_softmax(logits.float(), 1)).sum(1) * (y @ cw)).mean()
+
+
 @torch.no_grad()
 def predict(model, loader, device, amp_dtype, use_amp, desc=None):
-    """-> y (N,), P(Cracked) (N,), plain BCE loss."""
+    """-> y (N,), P(Cracked) (N,), plain loss (BCE / CE), and for --task six (class index (N,), softmax (N, 6))
+    else None. For six classes y and P(Cracked) are the collapsed binary task (models.crack_logit)."""
     model.eval()
     ys, logits = [], []
     for x, y in tqdm(loader, desc=desc, leave=False, disable=desc is None, dynamic_ncols=True):
@@ -274,7 +282,10 @@ def predict(model, loader, device, amp_dtype, use_amp, desc=None):
             logits.append(model(x.to(device, non_blocking=True)).float().cpu())
         ys.append(y)
     y, lg = torch.cat(ys), torch.cat(logits)
-    return y.numpy().astype(int), torch.sigmoid(lg).numpy(), F.binary_cross_entropy_with_logits(lg, y).item()
+    if lg.ndim == 1:
+        return y.numpy().astype(int), torch.sigmoid(lg).numpy(), F.binary_cross_entropy_with_logits(lg, y).item(), None
+    return ((y % 2).numpy().astype(int), torch.sigmoid(crack_logit(lg)).numpy(), F.cross_entropy(lg, y).item(),
+            (y.numpy(), torch.softmax(lg, 1).numpy()))
 
 
 def complexity(model, device, amp_dtype, use_amp, size, bs=64):
@@ -320,6 +331,15 @@ def main():
     args.imbalance = args.imbalance or "off"
     if args.imbalance not in ("off", "oversample", "smote"):
         raise SystemExit("--imbalance must be off | oversample | smote")
+    six = args.task == "six"
+    if args.task not in ("binary", "six"):
+        raise SystemExit("--task must be binary | six")
+    if args.optimizer not in ("adamw", "sgd"):
+        raise SystemExit("--optimizer must be adamw | sgd")
+    if six and args.imbalance == "smote":
+        raise SystemExit("--imbalance smote is binary only; use oversample or class weights with --task six")
+    if args.monitor in ("val_acc6", "val_f1m6") and not six:
+        raise SystemExit(f"--monitor {args.monitor} needs --task six")
     if args.train_full and args.split_mode != "balanced":
         raise SystemExit("--train-full only applies to split_mode balanced (random / group already use all images)")
     if args.epoch_ckpt not in ("full", "weights"):
@@ -377,24 +397,33 @@ def main():
     df = load_split(args.data_root, args.split_mode, args.seed, args.split_dir, args.val_frac, args.test_frac)
     if args.train_full:
         df = add_full_train(df, args.data_root)
+    if six:
+        df = add_six_class(df)
     if args.debug_subset:       # quick pipeline test: N images per split (both classes kept)
         df = df.groupby(["split", "label"], group_keys=False).head(args.debug_subset // 2)
     print("\n" + data_summary(df, "balanced+full-train" if args.train_full else args.split_mode, args.data_root))
     train_loader, val_loader, test_loader, (tr_df, va_df, te_df) = build_loaders(
         df, args.image_size, args.batch_size, args.num_workers, args.augment, pin_memory=device.type == "cuda",
-        seed=args.seed, norm=args.norm, oversample=args.imbalance == "oversample")
+        seed=args.seed, norm=args.norm, oversample=args.imbalance == "oversample", target="cls6" if six else "label")
 
     n_pos = int(tr_df["label"].sum()); n_neg = len(tr_df) - n_pos
     cw = torch.tensor([len(tr_df) / (2 * n_neg), len(tr_df) / (2 * n_pos)] if args.class_weights else [1., 1.],
                       device=device)
     print(f"\nclass weights: Non-cracked={cw[0]:.3f}  Cracked={cw[1]:.3f}  (train prevalence {n_pos / len(tr_df):.3f})")
+    if six:                     # one weight per surface x crack class, n / (6 * count)
+        cnt = tr_df["cls6"].value_counts().reindex(range(6), fill_value=1).to_numpy()
+        cw = torch.tensor(len(tr_df) / (6 * cnt) if args.class_weights else np.ones(6), dtype=torch.float32,
+                          device=device)
+        print("6-class weights: " + "  ".join(f"{c}={w:.3f}" for c, w in zip(SIX_CLASSES, cw.tolist())))
     print(f"loaders: train {len(train_loader)} batches x {args.batch_size} | val {len(val_loader)} x "
           f"{args.batch_size * 2} | test {len(test_loader)} x {args.batch_size * 2} | augment={args.augment}")
     bank = MinorityBank(args.smote_bank) if args.imbalance == "smote" else None
     print(f"batch augmentation: cutmix_alpha={args.cutmix_alpha} mixup_alpha={args.mixup_alpha} | imbalance={args.imbalance}")
 
     # ---- optim ---------------------------------------------------------------
-    opt = torch.optim.AdamW(param_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.999))
+    opt = (torch.optim.SGD(param_groups(model, args.weight_decay), lr=args.lr, momentum=args.momentum)
+           if args.optimizer == "sgd" else
+           torch.optim.AdamW(param_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.999)))
     accum = max(1, args.grad_accum)
     steps_per_epoch = math.ceil(len(train_loader) / accum)
     total_steps, warmup = args.epochs * steps_per_epoch, args.warmup_epochs * steps_per_epoch
@@ -429,7 +458,8 @@ def main():
               f"(best {args.monitor} {es.best_value:.4f} @ epoch {es.best_epoch}, no-improve count {es.bad})")
 
     cols = ["epoch", "lr", "train_loss", "train_acc", "val_loss", "val_acc", "val_bal_acc", "val_auc", "val_ap",
-            "val_f1", "val_f2", "val_precision", "val_recall", "val_mcc", "sec", "img_s"]
+            "val_f1", "val_f2", "val_precision", "val_recall", "val_mcc", "sec", "img_s"] + (
+            ["val_acc6", "val_f1m6"] if six else [])
     log_path = os.path.join(out, "log.csv")
     if args.resume:
         sync_after_resume(out, es, start_epoch - 1, args.resume, history, log_path, cols)
@@ -437,7 +467,7 @@ def main():
         with open(log_path, "w", newline="") as f:
             csv.writer(f).writerow(cols)
 
-    print(f"\ntraining: epochs={args.epochs} lr={args.lr} wd={args.weight_decay} warmup={args.warmup_epochs} "
+    print(f"\ntraining: task={args.task} optimizer={args.optimizer} epochs={args.epochs} lr={args.lr} wd={args.weight_decay} warmup={args.warmup_epochs} "
           f"scheduler={args.scheduler} | monitor={args.monitor} patience={args.early_stop_patience} "
           f"min_delta={args.early_stop_min_delta} | amp={amp_dtype if use_amp else 'off'} | ema={args.ema_decay or 'off'}"
           f" | save_every={args.save_every} ({args.epoch_ckpt})\n")
@@ -455,12 +485,14 @@ def main():
                 for g in opt.param_groups:
                     g["lr"] = lr
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            if six:
+                y = F.one_hot(y, 6).float()
             if bank is not None:
                 x, y = smote_batch(x, y, bank, args.smote_target)
             x, y = mix_batch(x, y, args.mixup_alpha, args.cutmix_alpha, args.mixup_prob, args.mixup_switch_prob)
             with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
                 logits = model(x)
-            loss = bce_loss(logits, y, args.label_smoothing, cw)
+            loss = (ce_loss if six else bce_loss)(logits, y, args.label_smoothing, cw)
             if not torch.isfinite(loss):
                 raise SystemExit(f"non-finite loss at epoch {epoch} iter {it}; lower --lr or keep --grad-clip on. "
                                  f"Resume from the last good checkpoint with --resume runs/{name}/last.pt")
@@ -473,18 +505,22 @@ def main():
                 if ema is not None:
                     ema.update(model)
             loss_sum += loss.item() * y.size(0)
-            correct += ((logits > 0).float() == (y >= 0.5).float()).sum().item(); n += y.size(0)
+            correct += ((logits.argmax(1) == y.argmax(1)) if six else
+                        ((logits > 0).float() == (y >= 0.5).float())).sum().item(); n += y.size(0)
             pbar.set_postfix(loss=f"{loss_sum / n:.4f}", acc=f"{correct / n:.4f}", lr=f"{lr:.1e}",
                              gpu=f"{torch.cuda.max_memory_allocated() / 2**30:.1f}G" if device.type == "cuda" else "cpu")
         pbar.close()
         train_sec = time.time() - t0
 
         # ---- validate ----
-        yv, pv, vloss = predict(eval_net, val_loader, device, amp_dtype, use_amp, f"  val {epoch}")
+        yv, pv, vloss, v6 = predict(eval_net, val_loader, device, amp_dtype, use_amp, f"  val {epoch}")
         mv = M.compute_all(yv, pv)
+        if six:
+            mv.update(M.six_class(*v6))
         row = dict(epoch=epoch, lr=lr, train_loss=loss_sum / n, train_acc=correct / n, val_loss=vloss,
                    **{f"val_{k}": mv[k] for k in ("acc", "bal_acc", "auc", "ap", "f1", "f2", "precision", "recall", "mcc")},
-                   sec=time.time() - t0, img_s=n / train_sec)
+                   sec=time.time() - t0, img_s=n / train_sec,
+                   **({"val_acc6": mv["acc6"], "val_f1m6": mv["f1m6"]} if six else {}))
         history.append(row)
         with open(log_path, "a", newline="") as f:
             csv.writer(f).writerow([f"{row[c]:.6g}" if isinstance(row[c], float) else row[c] for c in cols])
@@ -508,6 +544,7 @@ def main():
         print(f"epoch {epoch:3d}/{args.epochs} | lr {lr:.2e} | train loss {row['train_loss']:.4f} acc {row['train_acc']:.4f}"
               f" | val loss {vloss:.4f} acc {mv['acc']:.4f} auc {mv['auc']:.4f} ap {mv['ap']:.4f} f1 {mv['f1']:.4f}"
               f" rec {mv['recall']:.4f} prec {mv['precision']:.4f} mcc {mv['mcc']:.4f}"
+              + (f" | 6c acc {mv['acc6']:.4f} f1m {mv['f1m6']:.4f}" if six else "") +
               f" | {row['sec']:.0f}s ({row['img_s']:.0f} img/s) | ETA {eta(history, args.epochs, epoch)}"
               f" | best {args.monitor} {es.best_value:.4f}"
               + ("  * best" if improved else f"  (no improv {es.bad}/{args.early_stop_patience or '-'})"))
@@ -527,8 +564,8 @@ def main():
     # ================================================================ final evaluation (best.pt)
     ck = torch.load(os.path.join(out, "best.pt"), map_location=device, weights_only=False)
     eval_net.load_state_dict(ck["ema"] if ema is not None and ck.get("ema") is not None else ck["model"])
-    yv, pv, _ = predict(eval_net, val_loader, device, amp_dtype, use_amp, "val")
-    yt, pt, tloss = predict(eval_net, test_loader, device, amp_dtype, use_amp, "test")
+    yv, pv, _, _ = predict(eval_net, val_loader, device, amp_dtype, use_amp, "val")
+    yt, pt, tloss, t6 = predict(eval_net, test_loader, device, amp_dtype, use_amp, "test")
 
     # thresholds are chosen on VAL only, then applied to TEST
     thr_f, _ = M.best_f1_threshold(yv, pv, args.threshold_beta)
@@ -547,6 +584,14 @@ def main():
     if ci:
         print(f"\n  95% bootstrap CI @val-F1 thr ({thr_f:.3f}): "
               + " | ".join(f"{k} [{lo:.4f}, {hi:.4f}]" for k, (lo, hi) in ci.items()))
+
+    m6 = M.six_class(*t6) if six else None
+    if six:                     # the CrackNeXt SDNET2018 metrics: argmax over the 6 classes, macro-averaged
+        print(f"\n  6-CLASS (surface x crack, argmax): acc {m6['acc6']:.4f} | macro precision {m6['precision_m6']:.4f}"
+              f" | macro recall {m6['recall_m6']:.4f} | macro F1 {m6['f1m6']:.4f}")
+        cm = pd.DataFrame(m6["cm6"], index=[f"true {c}" for c in SIX_CLASSES], columns=SIX_CLASSES)
+        print(cm.to_string())
+        cm.to_csv(f"{out}/confusion6.csv")
 
     surf = te_df["surface"].to_numpy()
     srows = []
@@ -569,6 +614,10 @@ def main():
     surf_df.to_csv(f"{out}/per_surface.csv", index=False)
     pred = te_df[["path", "surface", "label"]].copy()
     pred["p_cracked"] = pt
+    if six:
+        pred["cls6"], pred["pred6"] = t6[0], t6[1].argmax(1)
+        for i, c in enumerate(SIX_CLASSES):
+            pred[f"p_{c}"] = t6[1][:, i]
     pred.to_csv(f"{out}/test_predictions.csv", index=False)
     write_report(out, name, yv, pv, yt, pt, cx["total_params"], cx.get("gmacs"), history, "best.pt", ck["epoch"])
 
@@ -576,7 +625,8 @@ def main():
                **{k: getattr(mcfg, a, None) for k, a in (("dim", "dim"), ("depth", "depth"), ("heads", "num_heads"),
                                                          ("patch", "patch_size"), ("stem", "stem"), ("pool", "pool"),
                                                          ("attn_stages", "attn_stages"))},
-               split_mode=args.split_mode, augment=args.augment,
+               split_mode=args.split_mode, augment=args.augment, task=args.task, optimizer=args.optimizer,
+               pretrained=args.pretrained, train_full=args.train_full,
                batch_size=args.batch_size * accum, lr=args.lr, epochs_run=len(history), best_epoch=es.best_epoch,
                stopped_early=stopped_early, train_min=total_min, test_loss=tloss, **cx, thr_val_f1=thr_f,
                thr_val_recall=thr_r)
@@ -585,6 +635,8 @@ def main():
         res[f"test_{k}@valF1thr"] = op_rows[1][k]
     for k, (lo, hi) in ci.items():
         res[f"ci_{k}_lo"], res[f"ci_{k}_hi"] = lo, hi
+    if six:
+        res.update({f"test_{k}": v for k, v in m6.items() if k != "cm6"})
     for r in srows:
         res[f"{r['surface']}_auc"], res[f"{r['surface']}_f1"] = r["auc"], r["f1"]
     with open(f"{out}/results.json", "w") as f:

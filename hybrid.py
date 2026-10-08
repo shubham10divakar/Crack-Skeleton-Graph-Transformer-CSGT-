@@ -207,7 +207,7 @@ class HybridNet(nn.Module):
             label = f"{k} {size}x{size} ({len(st)} blocks, {n_att} attention)"
             out.append(f"  {label:<40}{v:>12,}")
         out.insert(4, f"  {'stem':<40}{r['rows']['stem']:>12,}")
-        out += [f"  {'head (1 logit)':<40}{r['rows']['head']:>12,}", line,
+        out += [f"  {f'head ({c.num_outputs} logit' + ('s)' if c.num_outputs > 1 else ')'):<40}{r['rows']['head']:>12,}", line,
                 f"  {'TOTAL parameters':<40}{r['total_params']:>12,}  ({r['total_params'] / 1e6:.2f}M)", line]
         return "\n".join(out)
 

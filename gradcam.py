@@ -62,6 +62,7 @@ import metrics as M
 from data import NORMS, CrackDataset, build_transforms
 from evaluate import load_run, pick_device, run_split
 from hybrid import HybridNet
+from models import crack_logit
 
 CASES = {"TP": "true positive", "FN": "false negative (missed crack)",
          "FP": "false positive", "TN": "true negative"}
@@ -87,7 +88,7 @@ def get_args():
 @torch.no_grad()
 def predict(model, df, tf, device, bs):
     dl = DataLoader(CrackDataset(df, tf), batch_size=bs, shuffle=False, num_workers=0)
-    return torch.cat([torch.sigmoid(model(x.to(device)).float()).cpu() for x, _ in tqdm(dl, desc="predict", leave=False)]).numpy()
+    return torch.cat([torch.sigmoid(crack_logit(model(x.to(device))).float()).cpu() for x, _ in tqdm(dl, desc="predict", leave=False)]).numpy()
 
 
 # ---------------------------------------------------------------- explanations
@@ -139,7 +140,7 @@ class Explainer:
         try:
             x = x.clone().requires_grad_(True)
             with torch.enable_grad():
-                logit = self.m(x)
+                logit = crack_logit(self.m(x))
                 logit.float().sum().backward()
             g = self.m.grid
             res = {}
@@ -187,7 +188,7 @@ class HybridExplainer:
         self.feats = {}
         x = x.clone().requires_grad_(True)
         with torch.enable_grad():
-            logit = self.m(x)
+            logit = crack_logit(self.m(x))
             logit.float().sum().backward()
         res = {}
         for s in self.stages:
@@ -311,7 +312,7 @@ def deletion_insertion(model, x, maps, steps, bs):
         top = rank < int(round(k / steps * H * W))
         for out, a, b in ((dele, base, x), (ins, x, base)):           # top pixels taken from a, rest from b
             img = torch.where(top, a, b)
-            p = torch.cat([torch.sigmoid(model(img[i:i + bs]).float()) for i in range(0, N, bs)])
+            p = torch.cat([torch.sigmoid(crack_logit(model(img[i:i + bs])).float()) for i in range(0, N, bs)])
             out.append(p.mean().item())
     return np.array(dele), np.array(ins)
 

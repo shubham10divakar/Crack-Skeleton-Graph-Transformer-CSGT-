@@ -40,9 +40,9 @@ except ImportError:
         return it
 
 import metrics as M
-from data import CrackDataset, build_transforms, load_split
+from data import CrackDataset, add_six_class, build_transforms, load_split
 from paper import write_report
-from models import model_from_cfg
+from models import SIX_CLASSES, crack_logit, model_from_cfg
 
 TABLE = [("ROC-AUC", "auc", ".4f"), ("PR-AUC (average precision)", "ap", ".4f"), ("Accuracy", "acc", ".4f"),
          ("Crack recall (sensitivity)", "recall", ".4f"), ("Crack precision", "precision", ".4f"),
@@ -74,6 +74,7 @@ def run_split(targs, run):
 
 @torch.no_grad()
 def predict(model, df, tf, device, bs, workers, amp, desc):
+    """-> P(Cracked) (N,), and the 6-class softmax (N, 6) for --task six runs (else None)."""
     dl = DataLoader(CrackDataset(df, tf), batch_size=bs, shuffle=False, num_workers=workers,
                     pin_memory=device.type == "cuda")
     dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
@@ -81,7 +82,8 @@ def predict(model, df, tf, device, bs, workers, amp, desc):
     for x, _ in tqdm(dl, desc=desc, dynamic_ncols=True, leave=False):
         with torch.autocast(device.type, dtype=dtype, enabled=amp and device.type == "cuda"):
             out.append(model(x.to(device, non_blocking=True)).float().cpu())
-    return torch.sigmoid(torch.cat(out)).numpy()
+    lg = torch.cat(out)
+    return torch.sigmoid(crack_logit(lg)).numpy(), (torch.softmax(lg, 1).numpy() if lg.ndim == 2 else None)
 
 
 def gmacs(model, size, device):
@@ -121,12 +123,13 @@ def evaluate_one(args, run, ckpt_name, device):
     cache = os.path.join(out, "_preds.npz")
     if os.path.exists(cache) and not args.no_cache:
         z = np.load(cache); pv, pt = z["val"], z["test"]
+        pt6 = z["test6"] if "test6" in z else None
         print(f"loaded cached predictions from {cache}")
     else:
         tf = build_transforms(targs["image_size"], "none", targs.get("norm", "half"))
-        pv = predict(model, va, tf, device, args.batch_size, args.num_workers, not args.no_amp, "val")
-        pt = predict(model, te, tf, device, args.batch_size, args.num_workers, not args.no_amp, "test")
-        np.savez(cache, val=pv, test=pt)
+        pv, _ = predict(model, va, tf, device, args.batch_size, args.num_workers, not args.no_amp, "val")
+        pt, pt6 = predict(model, te, tf, device, args.batch_size, args.num_workers, not args.no_amp, "test")
+        np.savez(cache, val=pv, test=pt, **({"test6": pt6} if pt6 is not None else {}))
     yv, yt = va["label"].to_numpy().astype(int), te["label"].to_numpy().astype(int)
 
     beta = targs.get("threshold_beta", 1.0)
@@ -182,6 +185,14 @@ def evaluate_one(args, run, ckpt_name, device):
 
     print("\n" + "\n".join(md[2:]))
     print("per surface (val-F1 threshold):\n" + surf_df.to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if pt6 is not None:         # --task six: the CrackNeXt SDNET2018 metrics
+        m6 = M.six_class(add_six_class(te)["cls6"].to_numpy(), pt6)
+        cm = pd.DataFrame(m6.pop("cm6"), index=[f"true {c}" for c in SIX_CLASSES], columns=SIX_CLASSES)
+        cm.to_csv(os.path.join(out, "confusion6.csv"))
+        with open(os.path.join(out, "six_class.json"), "w") as f:
+            json.dump(m6, f, indent=2)
+        print(f"\n6-CLASS (argmax): acc {m6['acc6']:.4f} | macro precision {m6['precision_m6']:.4f} | "
+              f"macro recall {m6['recall_m6']:.4f} | macro F1 {m6['f1m6']:.4f}\n" + cm.to_string())
     print(f"\nall outputs -> {out}")
     hist = ck.get("history") or (json.load(open(os.path.join(run, "history.json")))
                                  if os.path.exists(os.path.join(run, "history.json")) else None)
